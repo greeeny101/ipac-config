@@ -1,0 +1,146 @@
+{
+  "schemaVersion": 2.0,
+  "resourceType": "ipac2-pins",
+  "deviceClass": "ipac2",
+  "debounce": "standard",
+  "paclink": false,
+  "pins": [
+    {
+      "name": "1up",
+      "action": "UP",
+      "alternate_action": "`"
+    },
+    {
+      "name": "1down",
+      "action": "DOWN",
+      "alternate_action": "P"
+    },
+    {
+      "name": "1left",
+      "action": "LEFT",
+      "alternate_action": "ENTER"
+    },
+    {
+      "name": "1right",
+      "action": "RIGHT",
+      "alternate_action": "TAB"
+    },
+    {
+      "name": "1sw1",
+      "action": "CTRL L",
+      "alternate_action": "5"
+    },
+    {
+      "name": "1sw2",
+      "action": "ALT L"
+    },
+    {
+      "name": "1sw3",
+      "action": "SPACE"
+    },
+    {
+      "name": "1sw4",
+      "action": "SHIFT L"
+    },
+    {
+      "name": "1sw5",
+      "action": "Z"
+    },
+    {
+      "name": "1sw6",
+      "action": "X"
+    },
+    {
+      "name": "1sw7",
+      "action": "C"
+    },
+    {
+      "name": "1sw8",
+      "action": "V"
+    },
+    {
+      "name": "2up",
+      "action": "R"
+    },
+    {
+      "name": "2down",
+      "action": "F"
+    },
+    {
+      "name": "2left",
+      "action": "D"
+    },
+    {
+      "name": "2right",
+      "action": "G"
+    },
+    {
+      "name": "2sw1",
+      "action": "A"
+    },
+    {
+      "name": "2sw2",
+      "action": "S"
+    },
+    {
+      "name": "2sw3",
+      "action": "Q"
+    },
+    {
+      "name": "2sw4",
+      "action": "W"
+    },
+    {
+      "name": "2sw5",
+      "action": "I"
+    },
+    {
+      "name": "2sw6",
+      "action": "K"
+    },
+    {
+      "name": "2sw7",
+      "action": "J"
+    },
+    {
+      "name": "2sw8",
+      "action": "L"
+    },
+    {
+      "name": "1start",
+      "action": "1",
+      "alternate_action": "1",
+      "shift": true
+    },
+    {
+      "name": "1coin",
+      "action": "5"
+    },
+    {
+      "name": "1a",
+      "action": "P"
+    },
+    {
+      "name": "1b",
+      "action": "ENTER"
+    },
+    {
+      "name": "2start",
+      "action": "2",
+      "alternate_action": "ESC"
+    },
+    {
+      "name": "2coin",
+      "action": "6"
+    },
+    {
+      "name": "2a",
+      "action": "TAB"
+    },
+    {
+      "name": "2b",
+      "action": "ESC"
+    }
+  ],
+  "raw": "50dd55000affffffffffff004cffffffffffffff045109521550074f0f190d060e1bff1d0c711a2c1472167029282b1323221f1effff00ffffffffffffffffffffffffffffff001300350028002b000000000000ff000000000000000022000000000000291effff01000000000000000000000000000000010101010101010101010101010100010101010101010101010101010101014100000a808080808080800a101010101010100000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000"
+}
