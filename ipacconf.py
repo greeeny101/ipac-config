@@ -64,7 +64,10 @@ CHUNK = 4  # config is sent 4 bytes at a time, in 5 byte output reports
 HEADER_WRITE = (0x50, 0xDD, 0x0F)  # 4th byte is the config bitfield
 HEADER_READ = (0x59, 0xDD, 0x0F, 0x00)
 
-SHIFT_MARKER = 0x41  # written at a pin's shift index to make it the shift key
+# Bit 6 of a pin's shift byte marks it as the shift key. Real boards carry
+# 0x01 in the low bits of every pin's shift byte and 0x41 on the shift pin, so
+# this is set and cleared as a bit rather than written as a whole byte.
+SHIFT_BIT = 0x40
 
 MACRO_START = 166  # index into the 252 byte data array
 MACRO_MAX_COUNT = 30
@@ -263,6 +266,23 @@ class DeviceError(Exception):
 # --------------------------------------------------------------------------
 
 
+def deframe(chunk: bytes) -> bytes:
+    """Strip report-id prefixes from one or more concatenated HID reports.
+
+    The board answers in 5-byte reports: [0x03, b0, b1, b2, b3]. A read that
+    keeps those ids inline leaves an 0x03 every five bytes, which is how this
+    bug announced itself.
+    """
+    size = 1 + CHUNK
+    out = bytearray()
+    for pos in range(0, len(chunk), size):
+        report = chunk[pos:pos + size]
+        if report and report[0] == REPORT_ID:
+            report = report[1:]
+        out += report
+    return bytes(out)
+
+
 def decode_config(buf: bytes) -> dict:
     """Turn a raw 256 byte board config into a profile dict."""
     if len(buf) < CONFIG_SIZE:
@@ -285,7 +305,7 @@ def decode_config(buf: bytes) -> dict:
         alt = data[alt_i]
         if alt:
             pin["alternate_action"] = _action_name(alt, macro_names)
-        if data[shift_i] == SHIFT_MARKER:
+        if data[shift_i] & SHIFT_BIT:
             pin["shift"] = True
         pins.append(pin)
 
@@ -301,6 +321,9 @@ def decode_config(buf: bytes) -> dict:
         profile["macros"] = [
             {"name": m["name"], "action": m["action"]} for m in macros
         ]
+    if buf[0] == 0x00 and buf[1] == 0x00 and buf[2]:
+        # a read response: byte 2 is the firmware version
+        profile["firmware"] = "%d.%02x" % (buf[2] >> 8, buf[2] & 0xFF)
     profile["raw"] = buf[:CONFIG_SIZE].hex()
     return profile
 
@@ -401,7 +424,10 @@ def encode_config(profile: dict, base: bytes) -> bytearray:
         if "alternate_action" in pin:
             data[alt_i] = _resolve(pin.get("alternate_action"), macro_codes)
         if "shift" in pin:
-            data[shift_i] = SHIFT_MARKER if pin["shift"] else 0
+            if pin["shift"]:
+                data[shift_i] |= SHIFT_BIT
+            else:
+                data[shift_i] &= ~SHIFT_BIT & 0xFF
     return buf
 
 
@@ -442,10 +468,27 @@ def _encode_macros(macros: list, data: memoryview) -> dict:
     return codes
 
 
+def as_write_command(buf: bytes) -> bytes:
+    """Put the write header on a config buffer.
+
+    Reads come back headed [0x00, 0x00, firmware, cfg]; writes must be
+    headed 0x50 0xdd 0x0f. Byte 3 (the config bitfield) is real config and is
+    left alone.
+    """
+    out = bytearray(buf[:CONFIG_SIZE])
+    out[0], out[1], out[2] = HEADER_WRITE
+    return bytes(out)
+
+
 def diff_config(before: bytes, after: bytes) -> list:
-    """Byte level diff, annotated with what each offset controls."""
+    """Byte level diff, annotated with what each offset controls.
+
+    The first three bytes are command framing rather than configuration -
+    they always differ between what was read and what will be written, so
+    reporting them would be noise on every single apply.
+    """
     out = []
-    for i in range(min(len(before), len(after))):
+    for i in range(3, min(len(before), len(after))):
         if before[i] != after[i]:
             out.append(
                 {
@@ -728,7 +771,6 @@ class Board:
 
         out = bytearray()
         deadline = time.monotonic() + self.timeout
-        first = True
         while len(out) < CONFIG_SIZE:
             remaining = deadline - time.monotonic()
             if remaining <= 0:
@@ -739,13 +781,8 @@ class Board:
             data = os.read(self.fd, 512)
             if not data:
                 continue
-            # The config interface uses numbered reports, so a read may be
-            # prefixed with the report id. The config's first byte is the
-            # header type (0x50/0x59), never 0x03, so this is unambiguous.
-            if first and data[0] == REPORT_ID:
-                data = data[1:]
-            first = False
-            out += data
+            # Every report carries its id, not just the first one.
+            out += deframe(data)
 
         if len(out) < CONFIG_SIZE:
             raise DeviceError(
@@ -1031,7 +1068,7 @@ def _gamepad_warning(profile: dict, info: DeviceInfo):
 
 
 def cmd_restore(args) -> int:
-    raw = load_raw(args.backup)
+    raw = as_write_command(load_raw(args.backup))
     with open_board(args) as board:
         current = board.read_config()
         changes = diff_config(current, raw)

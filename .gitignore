@@ -5,8 +5,8 @@ __pycache__/
 # Board backups, written automatically before every write. A local safety net,
 # and yours - no reason to publish them.
 ipac-backups/
-before.json
-before-*.json
+/before.json
+/before-*.json
 
 # USB captures. `tshark -i usbmon0` records EVERY device on the machine, not
 # just the I-PAC - keystrokes from a USB keyboard (passwords included), mass

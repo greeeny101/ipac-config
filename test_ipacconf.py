@@ -213,6 +213,136 @@ class TestFirmwareRules(unittest.TestCase):
             self.assertTrue(ic.firmware_note(bcd))
 
 
+class TestDeframe(unittest.TestCase):
+    """The board answers in 5-byte reports, each prefixed with its id."""
+
+    @staticmethod
+    def _frame(payload):
+        out = bytearray()
+        for pos in range(0, len(payload), ic.CHUNK):
+            out += bytes([ic.REPORT_ID]) + payload[pos:pos + ic.CHUNK]
+        return bytes(out)
+
+    def test_round_trip(self):
+        payload = bytes(range(0, 64))
+        self.assertEqual(ic.deframe(self._frame(payload)), payload)
+
+    def test_single_report(self):
+        self.assertEqual(ic.deframe(bytes([ic.REPORT_ID, 1, 2, 3, 4])), b"\x01\x02\x03\x04")
+
+    def test_report_without_an_id_is_left_alone(self):
+        self.assertEqual(ic.deframe(b"\x50\xdd\x0f\x00"), b"\x50\xdd\x0f\x00")
+
+    def test_no_stray_ids_survive(self):
+        payload = ic.default_config()
+        recovered = ic.deframe(self._frame(payload))
+        self.assertEqual(len(recovered), len(payload))
+        self.assertEqual(recovered, payload)
+
+
+class TestRealBoardDump(unittest.TestCase):
+    """Checks against a capture from Marc's board, firmware 1.44.
+
+    The fixture was taken before the framing bug was fixed, so its bytes
+    still carry a report id every fifth byte; the reconstruction below undoes
+    that. Replace it with a clean dump and this gets simpler.
+    """
+
+    @classmethod
+    def setUpClass(cls):
+        here = os.path.dirname(os.path.abspath(__file__))
+        path = os.path.join(here, "fixtures", "before-1.44.json")
+        if not os.path.exists(path):
+            raise unittest.SkipTest("no board dump present")
+        raw = bytes.fromhex(ic.load_profile(path)["raw"])
+        payload = bytes(b for i, b in enumerate(raw) if i % 5 != 4)
+        cls.header = payload[:4]
+        cls.data = payload[4:]
+
+    def test_response_header_carries_the_firmware(self):
+        self.assertEqual(self.header[0], 0x00)
+        self.assertEqual(self.header[1], 0x00)
+        self.assertEqual(self.header[2], 0x44)  # firmware 1.44
+
+    def test_pin_table_matches_the_factory_mame_layout(self):
+        """If an index were wrong, these would decode as garbage."""
+        expected = {
+            "1up": "UP", "1down": "DOWN", "1left": "LEFT", "1right": "RIGHT",
+            "1sw1": "CTRL L", "1sw2": "ALT L", "1sw3": "SPACE", "1sw4": "SHIFT L",
+            "1sw5": "Z", "1sw6": "X", "1sw7": "C", "1sw8": "V",
+            "2up": "R", "2down": "F", "2left": "D", "2right": "G",
+            "2sw1": "A", "2sw2": "S", "2sw3": "Q", "2sw4": "W",
+            "2sw5": "I", "2sw6": "K", "2sw7": "J", "2sw8": "L",
+            "1start": "1", "2start": "2", "1coin": "5", "2coin": "6",
+        }
+        for pin, action in expected.items():
+            with self.subTest(pin=pin):
+                index = ic.PIN_TABLE[pin][0]
+                self.assertEqual(ic.code_to_name(self.data[index]), action)
+
+    def test_the_two_disputed_indices_decode_sensibly(self):
+        """2sw1 and 2sw5, where we deviate from QtPyUltimarc's table."""
+        self.assertEqual(ic.code_to_name(self.data[ic.PIN_TABLE["2sw1"][0]]), "A")
+        self.assertEqual(ic.code_to_name(self.data[ic.PIN_TABLE["2sw5"][0]]), "I")
+
+    def test_start1_is_the_shift_key(self):
+        shift_index = ic.PIN_TABLE["1start"][2]
+        self.assertEqual(self.data[shift_index], 0x41)
+        self.assertTrue(self.data[shift_index] & ic.SHIFT_BIT)
+
+    def test_other_pins_carry_0x01_in_their_shift_byte(self):
+        """Which is why shift must be a bit operation, not a byte write."""
+        for pin in ("1sw1", "2sw8", "1coin"):
+            with self.subTest(pin=pin):
+                value = self.data[ic.PIN_TABLE[pin][2]]
+                self.assertEqual(value, 0x01)
+                self.assertFalse(value & ic.SHIFT_BIT)
+
+    def test_alternate_actions_are_the_documented_defaults(self):
+        self.assertEqual(ic.code_to_name(self.data[ic.PIN_TABLE["2start"][1]]), "ESC")
+        self.assertEqual(ic.code_to_name(self.data[ic.PIN_TABLE["1right"][1]]), "TAB")
+
+
+class TestShiftBit(unittest.TestCase):
+    def test_clearing_shift_preserves_the_other_bits(self):
+        base = bytearray(ic.default_config())
+        index = 4 + ic.PIN_TABLE["1sw1"][2]
+        base[index] = 0x41
+        updated = ic.encode_config({"pins": [{"name": "1sw1", "action": "A", "shift": False}]},
+                                   bytes(base))
+        self.assertEqual(updated[index], 0x01)
+
+    def test_setting_shift_preserves_the_other_bits(self):
+        base = bytearray(ic.default_config())
+        index = 4 + ic.PIN_TABLE["1sw1"][2]
+        base[index] = 0x01
+        updated = ic.encode_config({"pins": [{"name": "1sw1", "action": "A", "shift": True}]},
+                                   bytes(base))
+        self.assertEqual(updated[index], 0x41)
+
+    def test_shift_survives_a_round_trip(self):
+        base = bytearray(ic.default_config())
+        base[4 + ic.PIN_TABLE["1start"][2]] = 0x41
+        profile = ic.decode_config(bytes(base))
+        pin = next(p for p in profile["pins"] if p["name"] == "1start")
+        self.assertTrue(pin["shift"])
+
+
+class TestWriteHeader(unittest.TestCase):
+    def test_a_read_response_gets_the_write_header(self):
+        response = bytes([0x00, 0x00, 0x44, 0x00]) + b"\x01" * (ic.CONFIG_SIZE - 4)
+        self.assertEqual(tuple(ic.as_write_command(response)[:3]), ic.HEADER_WRITE)
+
+    def test_the_config_bitfield_is_not_touched(self):
+        response = bytes([0x00, 0x00, 0x44, 0x18]) + b"\x01" * (ic.CONFIG_SIZE - 4)
+        self.assertEqual(ic.as_write_command(response)[3], 0x18)
+
+    def test_diff_ignores_the_command_header(self):
+        before = bytes([0x00, 0x00, 0x44, 0x00]) + b"\x01" * (ic.CONFIG_SIZE - 4)
+        after = ic.as_write_command(before)
+        self.assertEqual(ic.diff_config(before, after), [])
+
+
 class TestIoctlNumbers(unittest.TestCase):
     """The board STALLs anything but an output report, so this matters."""
 

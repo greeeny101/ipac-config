@@ -140,14 +140,28 @@ real board ever disagrees.
 python3 -m unittest test_ipacconf.py
 ```
 
-41 tests, no hardware required. The one that matters most:
+61 tests, no hardware required. Two groups matter most:
 `decode(encode(x)) == x` byte-for-byte, which is what makes read-modify-write
-trustworthy.
+trustworthy; and `TestRealBoardDump`, which checks the pin table against a
+capture from an actual board — every pin decoding to its factory MAME default
+is strong evidence the indices are right.
 
 ## Status
 
-Verified on this machine against a fake device: CLI, web UI, diffing, backup,
-apply, restore, and the full test suite. **Not yet run against the physical
-board** — `dump` on the cabinet is the next step, and the first thing that
-could disprove the read path (the report-id handling on readback is the least
-certain part).
+Reading from a real board works, and the config it returns decodes to exactly
+the factory MAME layout — so the pin table, the code table and the transport
+are all confirmed against hardware.
+
+Writing has **not** yet been done against a real board. `apply --dry-run`
+against one is the next step.
+
+Three bugs the hardware found, all fixed:
+
+1. The config goes out as an **output** report, not a feature report.
+   Ultimarc's `wValue` 0x0203 is type 2 (Output); reading it as Feature made
+   the board STALL every write (`EPIPE`).
+2. **Every** read carries a report id, not just the first — leaving one 0x03
+   embedded every five bytes and truncating the config.
+3. Shift is **bit 6** of a pin's shift byte, not the whole byte. Real boards
+   carry 0x01 there normally and 0x41 on the shift pin, so writing 0x00 would
+   have cleared something the board cares about.
