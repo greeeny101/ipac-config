@@ -118,6 +118,14 @@ Reading is a `0x59 0xdd 0x0f 0x00` request followed by an input report.
 Worked out from [Ultimarc-linux](https://github.com/katie-snow/Ultimarc-linux)
 (C) and [QtPyUltimarc](https://github.com/katie-snow/QtPyUltimarc) (Python).
 
+If you capture the firmware flash over USB to fill in the undocumented parts
+(the enter-bootloader command, the gamepad mode bytes), **read the capture
+before committing it**. `tshark -i usbmon0` records every USB device on the
+machine, not just the I-PAC — a keyboard attached at the time will have typed
+passwords in there. Captures, and `lsusb -v` output with its device serial
+numbers, are gitignored for that reason; force-add deliberately once you've
+checked one.
+
 One deviation, in `ipacconf.py`'s pin table: QtPyUltimarc lists `2sw1` and
 `2sw5` with alternate-action indices that break the otherwise perfectly regular
 `action+50` layout, and one of them collides with `1sw5`'s. They look like

@@ -1,3 +1,47 @@
+# Python
 __pycache__/
 *.pyc
+
+# Board backups, written automatically before every write. A local safety net,
+# and yours - no reason to publish them.
 ipac-backups/
+before.json
+before-*.json
+
+# USB captures. `tshark -i usbmon0` records EVERY device on the machine, not
+# just the I-PAC - keystrokes from a USB keyboard (passwords included), mass
+# storage traffic, webcams. Read one before you even think about committing
+# it; force-add deliberately (git add -f) if you have checked it and want it
+# as a protocol fixture.
+*.pcap
+*.pcapng
+*.pcapng.gz
+*.pcap.gz
+
+# `lsusb -v` output carries device serial numbers (iSerial) for everything
+# attached to the machine.
+lsusb-*.txt
+*-lsusb.txt
+ipac-before.txt
+ipac-bootloader.txt
+
+# Ultimarc's firmware is theirs, not ours to redistribute.
+*.ufw
+ipac_multimode.zip
+ipac_mixedmode.zip
+firmware_*.zip
+
+# Editors and OS cruft. .history/ in particular keeps snapshots of every edit,
+# which can carry content long after you deleted it from the working file.
+.DS_Store
+.vscode/
+.idea/
+.history/
+*.swp
+*~
+
+# Anything that wanders in from a shell session
+*.pem
+id_rsa*
+.env
+.env.*
