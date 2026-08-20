@@ -98,10 +98,14 @@ This is the usual reason to reach for the tool, and it depends on firmware:
 switch goes wrong, hold `P1SW1` while plugging in USB. Note the config
 interface is unavailable in Xinput mode — configure in keyboard or Dinput.
 
-`profiles/batocera-gamepad.template.json` is **unverified**: the joystick
-direction encoding needs confirming by dumping the config before and after a
-mode switch and diffing. `apply` warns if a profile uses gamepad codes the
-firmware can't act on.
+**You probably do not need a gamepad profile at all.** On 1.50+ firmware,
+switching to Dinput makes the board present as two game controllers on its
+own; the pin-to-button mapping is internal and the config block is untouched.
+Switch mode, and Batocera sees controllers.
+
+`profiles/batocera-gamepad.template.json` remains only for the case where you
+want *custom* per-pin gamepad button assignments. It is unverified, and
+applying it is not part of the normal path.
 
 If the firmware is keyboard-only and you'd rather not flash, Batocera's
 `keyboardToPads` (v41+) or `xarcade2jstick` (v40−) synthesize virtual gamepads
@@ -131,6 +135,10 @@ USB product id**, and switching with `Start1+P1SW2` re-enumerates it:
 |---|---|---|
 | `d209:0420` | keyboard | 3 |
 | `d209:0421` | Dinput game controller | 4 |
+
+Confirmed by dumping a real board in both modes: the two configs are
+**byte-identical**, keycodes and all. In Dinput the board maps pins to gamepad
+buttons internally and simply ignores the key assignments.
 
 This is why a keyboard-mode dump and a Dinput-mode dump are **byte-identical**
 — the mode is not in the 256-byte config at all. `list` reports it from the

@@ -312,9 +312,8 @@ class TestRealBoardDump(unittest.TestCase):
         self.assertEqual(embedded, [])
 
     def test_response_header_carries_the_firmware(self):
-        self.assertEqual(self.raw[0], 0x00)
-        self.assertEqual(self.raw[1], 0x00)
         self.assertEqual(self.raw[2], 0x44)  # firmware 1.44
+        self.assertEqual(ic.decode_config(self.raw)["firmware"], "0.44")
 
     def test_every_pin_is_assigned(self):
         profile = ic.decode_config(self.raw)
@@ -441,6 +440,44 @@ class TestIoctlNumbers(unittest.TestCase):
         for _, op in ic.Board.TRANSPORTS:
             self.assertGreaterEqual(op, -(1 << 31))
             self.assertLess(op, 1 << 31)
+
+
+class TestPostFlashDumps(unittest.TestCase):
+    """Firmware 1.55, dumped in both modes from a real board."""
+
+    @classmethod
+    def setUpClass(cls):
+        here = os.path.join(os.path.dirname(os.path.abspath(__file__)), "fixtures")
+        try:
+            cls.kb = bytes.fromhex(
+                ic.load_profile(os.path.join(here, "ipac2-1.55-keyboard.json"))["raw"])
+            cls.di = bytes.fromhex(
+                ic.load_profile(os.path.join(here, "ipac2-1.55-dinput.json"))["raw"])
+        except (OSError, ic.ProtocolError):
+            raise unittest.SkipTest("post-flash dumps not present")
+
+    def test_mode_is_not_stored_in_the_config(self):
+        """Keyboard and Dinput dumps are byte-identical."""
+        self.assertEqual(ic.diff_config(self.kb, self.di), [])
+        self.assertEqual(self.kb, self.di)
+
+    def test_firmware_is_reported_despite_a_different_header_prefix(self):
+        """1.44 answers 00 00 ver cfg; 1.55 answers 50 dd ver cfg."""
+        self.assertEqual(self.kb[2], 0x55)
+        self.assertEqual(ic.decode_config(self.kb)["firmware"], "0.55")
+
+    def test_the_flash_preserved_the_key_mapping(self):
+        actions = {p["name"]: p["action"] for p in ic.decode_config(self.kb)["pins"]}
+        self.assertEqual(actions["1sw1"], "CTRL L")
+        self.assertEqual(actions["2sw5"], "I")
+        self.assertEqual(len(actions), 32)
+
+    def test_shift_survived_the_flash(self):
+        pins = ic.decode_config(self.kb)["pins"]
+        self.assertTrue(next(p for p in pins if p["name"] == "1start").get("shift"))
+
+    def test_a_config_we_built_has_no_firmware_field(self):
+        self.assertIsNone(ic.decode_config(ic.default_config()).get("firmware"))
 
 
 class TestModeDetection(unittest.TestCase):

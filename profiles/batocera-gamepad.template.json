@@ -1,5 +1,5 @@
 {
-  "_comment": "TEMPLATE - NOT YET VERIFIED AGAINST HARDWARE. Two things must happen before this is trustworthy: (1) the board needs firmware 1.50+ (it ships 1.44, which is keyboard-only), and (2) the joystick direction encoding needs confirming by dumping the config before and after a Start1+P1SW2 mode switch and diffing. `apply` will warn if the firmware cannot act on these codes.",
+  "_comment": "NOT NEEDED FOR NORMAL USE, AND UNVERIFIED. On firmware 1.50+ the board becomes two game controllers simply by switching to Dinput mode (hold Start1+P1SW2 for 10 seconds); the pin-to-button mapping is internal and the config block is not involved - a keyboard-mode dump and a Dinput-mode dump are byte-identical. This file exists only for the untested case of wanting custom per-pin gamepad button assignments.",
   "_sticks_note": "Stick pins (1up/1down/1left/1right, 2up/...) are deliberately absent. Pins a profile does not mention keep whatever the board already has, so this file will not break your sticks. Whether directions want HAT 0..3, ANALOG 0..7 or GAMEPAD codes is the open question the dump diff answers - add them here once known.",
   "schemaVersion": 2.0,
   "resourceType": "ipac2-pins",
@@ -7,29 +7,101 @@
   "debounce": "standard",
   "paclink": false,
   "pins": [
-    {"name": "1sw1", "action": "GAMEPAD 1"},
-    {"name": "1sw2", "action": "GAMEPAD 2"},
-    {"name": "1sw3", "action": "GAMEPAD 3"},
-    {"name": "1sw4", "action": "GAMEPAD 4"},
-    {"name": "1sw5", "action": "GAMEPAD 5"},
-    {"name": "1sw6", "action": "GAMEPAD 6"},
-    {"name": "1sw7", "action": "GAMEPAD 7"},
-    {"name": "1sw8", "action": "GAMEPAD 8"},
-    {"name": "1start", "action": "GAMEPAD 9"},
-    {"name": "1coin", "action": "GAMEPAD 10"},
-    {"name": "1a", "action": "GAMEPAD 11"},
-    {"name": "1b", "action": "GAMEPAD 12"},
-    {"name": "2sw1", "action": "GAMEPAD 1"},
-    {"name": "2sw2", "action": "GAMEPAD 2"},
-    {"name": "2sw3", "action": "GAMEPAD 3"},
-    {"name": "2sw4", "action": "GAMEPAD 4"},
-    {"name": "2sw5", "action": "GAMEPAD 5"},
-    {"name": "2sw6", "action": "GAMEPAD 6"},
-    {"name": "2sw7", "action": "GAMEPAD 7"},
-    {"name": "2sw8", "action": "GAMEPAD 8"},
-    {"name": "2start", "action": "GAMEPAD 9"},
-    {"name": "2coin", "action": "GAMEPAD 10"},
-    {"name": "2a", "action": "GAMEPAD 11"},
-    {"name": "2b", "action": "GAMEPAD 12"}
+    {
+      "name": "1sw1",
+      "action": "GAMEPAD 1"
+    },
+    {
+      "name": "1sw2",
+      "action": "GAMEPAD 2"
+    },
+    {
+      "name": "1sw3",
+      "action": "GAMEPAD 3"
+    },
+    {
+      "name": "1sw4",
+      "action": "GAMEPAD 4"
+    },
+    {
+      "name": "1sw5",
+      "action": "GAMEPAD 5"
+    },
+    {
+      "name": "1sw6",
+      "action": "GAMEPAD 6"
+    },
+    {
+      "name": "1sw7",
+      "action": "GAMEPAD 7"
+    },
+    {
+      "name": "1sw8",
+      "action": "GAMEPAD 8"
+    },
+    {
+      "name": "1start",
+      "action": "GAMEPAD 9"
+    },
+    {
+      "name": "1coin",
+      "action": "GAMEPAD 10"
+    },
+    {
+      "name": "1a",
+      "action": "GAMEPAD 11"
+    },
+    {
+      "name": "1b",
+      "action": "GAMEPAD 12"
+    },
+    {
+      "name": "2sw1",
+      "action": "GAMEPAD 1"
+    },
+    {
+      "name": "2sw2",
+      "action": "GAMEPAD 2"
+    },
+    {
+      "name": "2sw3",
+      "action": "GAMEPAD 3"
+    },
+    {
+      "name": "2sw4",
+      "action": "GAMEPAD 4"
+    },
+    {
+      "name": "2sw5",
+      "action": "GAMEPAD 5"
+    },
+    {
+      "name": "2sw6",
+      "action": "GAMEPAD 6"
+    },
+    {
+      "name": "2sw7",
+      "action": "GAMEPAD 7"
+    },
+    {
+      "name": "2sw8",
+      "action": "GAMEPAD 8"
+    },
+    {
+      "name": "2start",
+      "action": "GAMEPAD 9"
+    },
+    {
+      "name": "2coin",
+      "action": "GAMEPAD 10"
+    },
+    {
+      "name": "2a",
+      "action": "GAMEPAD 11"
+    },
+    {
+      "name": "2b",
+      "action": "GAMEPAD 12"
+    }
   ]
 }

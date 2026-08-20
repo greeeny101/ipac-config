@@ -347,9 +347,11 @@ def decode_config(buf: bytes) -> dict:
         profile["macros"] = [
             {"name": m["name"], "action": m["action"]} for m in macros
         ]
-    if buf[0] == 0x00 and buf[1] == 0x00 and buf[2]:
-        # a read response: byte 2 is the firmware version
-        profile["firmware"] = "%d.%02x" % (buf[2] >> 8, buf[2] & 0xFF)
+    # Byte 2 is the firmware version in a read response, and 0x0f in anything
+    # we built ourselves. Firmware 1.44 answers [0x00, 0x00, ver, cfg] and
+    # 1.55 answers [0x50, 0xdd, ver, cfg], so the header prefix is no guide.
+    if buf[2] != HEADER_WRITE[2]:
+        profile["firmware"] = "0.%02x" % buf[2]
     profile["raw"] = buf[:CONFIG_SIZE].hex()
     return profile
 
