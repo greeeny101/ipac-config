@@ -213,6 +213,35 @@ class TestFirmwareRules(unittest.TestCase):
             self.assertTrue(ic.firmware_note(bcd))
 
 
+class TestIoctlNumbers(unittest.TestCase):
+    """The board STALLs anything but an output report, so this matters."""
+
+    @staticmethod
+    def _iowr(nr, size):
+        # _IOWR('H', nr, size), computed independently of ipacconf
+        value = (3 << 30) | (size << 16) | (0x48 << 8) | nr
+        return value - (1 << 32) if value >= (1 << 31) else value
+
+    def test_output_report_is_tried_first(self):
+        name, op = ic.Board.TRANSPORTS[0]
+        self.assertEqual(name, "output report")
+        self.assertEqual(op, self._iowr(0x0B, 5))  # HIDIOCSOUTPUT(5)
+
+    def test_feature_report_is_the_fallback(self):
+        name, op = ic.Board.TRANSPORTS[1]
+        self.assertEqual(name, "feature report")
+        self.assertEqual(op, self._iowr(0x06, 5))  # HIDIOCSFEATURE(5)
+
+    def test_message_length_is_report_id_plus_chunk(self):
+        self.assertEqual(ic.Board.MESSAGE_LENGTH, 5)
+        self.assertEqual(ic.CHUNK, 4)
+
+    def test_ioctl_fits_in_a_signed_int(self):
+        for _, op in ic.Board.TRANSPORTS:
+            self.assertGreaterEqual(op, -(1 << 31))
+            self.assertLess(op, 1 << 31)
+
+
 class TestFakeBoard(unittest.TestCase):
     def setUp(self):
         self.dir = tempfile.mkdtemp()

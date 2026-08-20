@@ -3,8 +3,8 @@
 ipacconf - configure an Ultimarc I-PAC 2 (2015+) from Linux.
 
 Standard library only. Talks to the board through /dev/hidraw via the
-HIDIOCSFEATURE ioctl, which is the same USB transaction WinIPAC uses
-(SET_REPORT, feature report id 3) but needs no libusb, no udev rules and no
+HIDIOCSOUTPUT ioctl, which is the same USB transaction WinIPAC uses
+(SET_REPORT, output report id 3) but needs no libusb, no udev rules and no
 detaching of the kernel HID driver. That makes it a straight scp onto a
 Batocera box, whose root filesystem is read-only and has no pip.
 
@@ -24,6 +24,7 @@ from __future__ import annotations
 import argparse
 import ctypes
 import datetime
+import errno
 import glob
 import json
 import os
@@ -58,7 +59,7 @@ KNOWN_2015_PRODUCTS = {
 
 REPORT_ID = 0x03
 CONFIG_SIZE = 256  # 4 byte header + 252 data bytes
-CHUNK = 4  # config is sent 4 bytes at a time, in 5 byte feature reports
+CHUNK = 4  # config is sent 4 bytes at a time, in 5 byte output reports
 
 HEADER_WRITE = (0x50, 0xDD, 0x0F)  # 4th byte is the config bitfield
 HEADER_READ = (0x59, 0xDD, 0x0F, 0x00)
@@ -477,7 +478,13 @@ def describe_offset(offset: int) -> str:
 # Device layer
 # --------------------------------------------------------------------------
 
-# HIDIOCSFEATURE(len) = _IOWR('H', 0x06, len)
+# hidraw ioctls, from linux/hidraw.h:
+#   HIDIOCSOUTPUT(len)  = _IOWR('H', 0x0b, len)  SET_REPORT, type Output  (2)
+#   HIDIOCSFEATURE(len) = _IOWR('H', 0x06, len)  SET_REPORT, type Feature (3)
+#
+# The board wants wValue 0x0203 - report type 2 (Output), report id 3 - which
+# is HIDIOCSOUTPUT. Sending the same bytes as a Feature report (0x0303) makes
+# the device STALL the control transfer, which arrives here as EPIPE.
 _IOC_WRITE = 1
 _IOC_READ = 2
 
@@ -589,8 +596,11 @@ def select_device(explicit_path=None) -> DeviceInfo:
     devices = find_devices(include_unsupported=True)
     if not devices:
         raise DeviceError(
-            "no Ultimarc board found. Check `lsusb | grep -i d20`, and note "
-            "that reading /dev/hidraw* normally needs root."
+            "no Ultimarc board found - no /dev/hidraw node belongs to one.\n"
+            "  - `lsusb | grep -i d20` shows it?  the kernel may not have bound "
+            "usbhid, or another process (a VM's USB passthrough) holds the "
+            "device - check `lsusb -t` for Driver=usbhid\n"
+            "  - nothing in lsusb?  it is a cable, port or power problem"
         )
 
     legacy = [d for d in devices if d.vendor == VENDOR_PRE2015]
@@ -626,11 +636,19 @@ def select_device(explicit_path=None) -> DeviceInfo:
 class Board:
     """A real board, reached through /dev/hidrawN."""
 
-    HIDIOCSFEATURE_5 = _iowr("H", 0x06, 1 + CHUNK)
+    MESSAGE_LENGTH = 1 + CHUNK  # report id + 4 config bytes
+
+    # Output first, since that is what the board documents. Feature is kept as
+    # a fallback so a stall does not need a second trip to the hardware.
+    TRANSPORTS = (
+        ("output report", _iowr("H", 0x0B, MESSAGE_LENGTH)),
+        ("feature report", _iowr("H", 0x06, MESSAGE_LENGTH)),
+    )
 
     def __init__(self, info: DeviceInfo, timeout=2.0):
         self.info = info
         self.timeout = timeout
+        self.transport = None  # settles on whichever the board accepts
         try:
             self.fd = os.open(info.path, os.O_RDWR)
         except PermissionError:
@@ -656,7 +674,48 @@ class Board:
         import fcntl  # Linux only; imported late so the module loads anywhere
 
         buf = ctypes.create_string_buffer(bytes(payload), len(payload))
-        fcntl.ioctl(self.fd, self.HIDIOCSFEATURE_5, buf, True)
+
+        candidates = (
+            [self.transport] if self.transport else list(self.TRANSPORTS)
+        )
+        stalled = []
+        for name, op in candidates:
+            try:
+                fcntl.ioctl(self.fd, op, buf, True)
+            except OSError as exc:
+                if exc.errno == errno.EPIPE:
+                    # The device stalled the control transfer: it does not
+                    # implement this report. Try the next kind, if any.
+                    stalled.append(name)
+                    continue
+                raise DeviceError(
+                    "%s while writing to %s: %s"
+                    % (type(exc).__name__, self.info.path, exc)
+                )
+            if self.transport is None:
+                self.transport = (name, op)
+                if name != self.TRANSPORTS[0][0]:
+                    print(
+                        "note: board accepted a %s, not an %s"
+                        % (name, self.TRANSPORTS[0][0]),
+                        file=sys.stderr,
+                    )
+            return
+
+        raise DeviceError(
+            "%s stalled every request (tried: %s).\n"
+            "That usually means this hidraw node is not the config interface. "
+            "This board's config interface should be %d - check `ipacconf.py "
+            "list`, then try the others explicitly:\n"
+            "  for n in /dev/hidraw*; do echo \"== $n\"; %s --device $n dump "
+            "| head -3; done"
+            % (
+                self.info.path,
+                ", ".join(stalled),
+                config_interface_for(self.info.bcd & 0xFF),
+                os.path.basename(sys.argv[0]) or "ipacconf.py",
+            )
+        )
 
     def _send_block(self, buf: bytes):
         for pos in range(0, len(buf), CHUNK):

@@ -109,9 +109,11 @@ from a keyboard encoder — pair that with sensible keycodes written by this too
 
 ## Protocol
 
-2015+ boards take a 256-byte config as 4-byte chunks inside HID feature
-reports (report id 3) — `HIDIOCSFEATURE` on the hidraw node for the config
-interface. Interface is 2 for firmware in `[0x40, 0x56)`, else 3. Keys are
+2015+ boards take a 256-byte config as 4-byte chunks inside HID **output**
+reports (report id 3) — `HIDIOCSOUTPUT` on the hidraw node for the config
+interface. Ultimarc's `wValue` of `0x0203` is `(report_type << 8) | report_id`,
+and type 2 is Output, not Feature; sending it as a Feature report makes the
+board STALL the transfer (`EPIPE`). Interface is 2 for firmware in `[0x40, 0x56)`, else 3. Keys are
 standard USB HID usage IDs; `0x90`+ is Ultimarc's gamepad/analog/hat range.
 Reading is a `0x59 0xdd 0x0f 0x00` request followed by an input report.
 
