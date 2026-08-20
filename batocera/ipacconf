@@ -1,0 +1,74 @@
+#!/bin/bash
+#
+# Batocera service: keep the I-PAC 2 configurator's web UI running.
+#
+# Install:
+#   cp ipacconf /userdata/system/services/ipacconf
+#   chmod +x /userdata/system/services/ipacconf
+#   batocera-services enable ipacconf
+#   batocera-services start  ipacconf
+#
+# The name must stay "ipacconf" - no extension, no dots, no leading digit,
+# or batocera-services will not list it.
+
+DIR=/userdata/system/ipac-config
+PYTHON=/usr/bin/python3
+PORT=8080
+HOST=0.0.0.0
+
+PIDFILE=/tmp/ipacconf.pid
+LOGDIR=/userdata/system/logs
+LOG="${LOGDIR}/ipacconf.log"
+
+running() {
+    [ -f "${PIDFILE}" ] && kill -0 "$(cat "${PIDFILE}" 2>/dev/null)" 2>/dev/null
+}
+
+case "${1}" in
+    start)
+        if running; then
+            echo "ipacconf already running (pid $(cat "${PIDFILE}"))"
+            exit 0
+        fi
+        if [ ! -f "${DIR}/ipacconf.py" ]; then
+            echo "ipacconf: ${DIR}/ipacconf.py not found" >&2
+            exit 1
+        fi
+        mkdir -p "${LOGDIR}"
+        # Background it: S99 waits for services to return, so a blocking
+        # server here would stall the boot.
+        "${PYTHON}" "${DIR}/ipacconf.py" serve --host "${HOST}" --port "${PORT}" \
+            >>"${LOG}" 2>&1 &
+        echo $! > "${PIDFILE}"
+        echo "ipacconf started on port ${PORT} (pid $(cat "${PIDFILE}"))"
+        ;;
+
+    stop)
+        if running; then
+            kill "$(cat "${PIDFILE}")" 2>/dev/null
+            echo "ipacconf stopped"
+        else
+            echo "ipacconf not running"
+        fi
+        rm -f "${PIDFILE}"
+        ;;
+
+    restart)
+        "${0}" stop
+        "${0}" start
+        ;;
+
+    status)
+        if running; then
+            echo "ipacconf running (pid $(cat "${PIDFILE}")) on port ${PORT}"
+            exit 0
+        fi
+        echo "ipacconf stopped"
+        exit 1
+        ;;
+
+    *)
+        echo "usage: ${0} {start|stop|restart|status}" >&2
+        exit 1
+        ;;
+esac
