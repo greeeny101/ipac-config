@@ -200,6 +200,32 @@ trustworthy; and `TestRealBoardDump`, which checks the pin table against a
 capture from an actual board — every pin decoding to its factory MAME default
 is strong evidence the indices are right.
 
+## Next
+
+**Mode switching from the CLI and UI.** The command is not public and is not in
+either open-source implementation. Get it by capturing WinIPAC doing *File →
+Force Board Reconfiguration* — switch to Dinput and back to keyboard in one
+recording, so both directions can be diffed against each other. Look for a
+`SET_REPORT` whose header byte is neither `0x50` (write) nor `0x59` (read).
+Gate any Xinput switch behind a confirmation: the board cannot be reached over
+USB in that mode, so it is the one switch the tool cannot undo.
+
+**Importing saved configs in the web UI.** Two halves, and they are different
+operations:
+
+- *Load into the form* — file picker, parse, populate the dropdowns, review,
+  then write. Fine for hand-edited profiles.
+- *Restore exactly* — for dumps carrying a `raw` field, write those 256 bytes
+  byte-for-byte, as the CLI's `restore` does. Necessary because a dump can
+  hold macros and unnamed bytes the pin form cannot represent, and round
+  tripping through the form would silently drop them.
+
+Add a server-side backup browser too: `apply` writes to
+`/userdata/system/ipac-backups/` on the cabinet, so the backups live there
+rather than on the phone being used to browse. Listing them with timestamps
+and a one-click restore is likely more useful than uploading a file. Warn when
+a dump's firmware differs from the connected board's.
+
 ## Status
 
 Reading from a real board works. The config it returns decodes to exactly the
