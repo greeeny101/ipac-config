@@ -122,6 +122,20 @@ Reading is a `0x59 0xdd 0x0f 0x00` request followed by an input report.
 Worked out from [Ultimarc-linux](https://github.com/katie-snow/Ultimarc-linux)
 (C) and [QtPyUltimarc](https://github.com/katie-snow/QtPyUltimarc) (Python).
 
+### The bootloader
+
+Putting a board into firmware-upgrade mode makes it re-enumerate as
+**`d209:0750` "Ultimarc UHID Firmware Update"** — Ultimarc's own bootloader,
+sharing the vendor id, not the stock Microchip HID bootloader (`04d8:003c`).
+So `mphidflash` and friends are out, and flashing from Linux would mean
+reimplementing this bootloader's protocol from a USB capture of WinIPAC doing
+it. The `.ufw` files are ASCII hex records that look ready to replay — 171 of
+them: `ff 38` start, `ff 39` data (a block index plus 66 payload bytes), `ff
+3b` end — but the command that *enters* bootloader mode is undocumented and
+has to come off the wire.
+
+Noted here because it is not written down anywhere else.
+
 If you capture the firmware flash over USB to fill in the undocumented parts
 (the enter-bootloader command, the gamepad mode bytes), **read the capture
 before committing it**. `tshark -i usbmon0` records every USB device on the
