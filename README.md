@@ -140,6 +140,17 @@ Confirmed by dumping a real board in both modes: the two configs are
 **byte-identical**, keycodes and all. In Dinput the board maps pins to gamepad
 buttons internally and simply ignores the key assignments.
 
+Switching is done by holding buttons — `Start1+P1SW1` keyboard, `+P1SW2`
+Dinput, `+P1SW3` Xinput, ten seconds each. WinIPAC can also switch in software
+(*File → Force Board Reconfiguration*), so a command for it exists, but it is
+not in either open-source implementation and we have not captured it. Since
+the mode is not in the config block, it must be a separate message — likely
+another `0x5x` header beside `0x50` (write) and `0x59` (read).
+
+**Xinput is a one-way door for this tool**: Ultimarc document that the board
+cannot be reconfigured or mode-switched over USB while in Xinput, so the way
+back is the `Start1+P1SW1` hotkey or holding P1SW1 while plugging in USB.
+
 This is why a keyboard-mode dump and a Dinput-mode dump are **byte-identical**
 — the mode is not in the 256-byte config at all. `list` reports it from the
 descriptor. Xinput presumably has its own id; unverified.

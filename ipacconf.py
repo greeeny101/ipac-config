@@ -1469,6 +1469,26 @@ PAGE = """<!doctype html>
     <div id="status"></div>
   </div>
 
+  <div class="card">
+    <h2 style="margin-top:0">Changing mode</h2>
+    <p class="muted">The board's mode is not stored in its configuration - it is
+    a property of how the board presents itself over USB, and it is changed by
+    holding buttons on the panel, not from here. Hold for a full 10 seconds:</p>
+    <table>
+      <tr><th>hold</th><th>gives</th><th>notes</th></tr>
+      <tr><td class="pin">Start1 + P1SW1</td><td>keyboard</td>
+          <td class="muted">sends keycodes; this tool can configure it</td></tr>
+      <tr><td class="pin">Start1 + P1SW2</td><td>Dinput</td>
+          <td class="muted">two game controllers; this tool can still configure it</td></tr>
+      <tr><td class="pin">Start1 + P1SW3</td><td>Xinput</td>
+          <td class="muted">two Xbox 360 pads - <strong>this tool cannot reach the
+          board in this mode</strong></td></tr>
+    </table>
+    <p class="muted">Start1 must be the shift key for these to work. If a switch
+    goes wrong, hold P1SW1 while plugging in the USB cable to force keyboard
+    mode.</p>
+  </div>
+
   <div class="card" id="pins"><span class="muted">loading...</span></div>
 </main>
 <script>
@@ -1558,6 +1578,7 @@ async function loadDevice() {
     const d = await api('/api/device');
     $('#device').innerHTML = `<dl>
       <dt>board</dt><dd>${esc(d.name)} (${esc(d.vendor)}:${esc(d.product)})${d.fake ? ' <em>fake</em>' : ''}</dd>
+      <dt>mode</dt><dd><strong>${esc(d.mode)}</strong></dd>
       <dt>firmware</dt><dd>${esc(d.firmware)} - ${esc(d.firmware_note)}</dd>
       <dt>gamepad</dt><dd>${d.supports_gamepad ? 'supported' : 'not in this firmware'}</dd>
       <dt>node</dt><dd>${esc(d.path)} (interface ${d.interface})</dd></dl>`;
