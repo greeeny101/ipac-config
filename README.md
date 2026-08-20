@@ -140,7 +140,7 @@ real board ever disagrees.
 python3 -m unittest test_ipacconf.py
 ```
 
-61 tests, no hardware required. Two groups matter most:
+68 tests, no hardware required. Two groups matter most:
 `decode(encode(x)) == x` byte-for-byte, which is what makes read-modify-write
 trustworthy; and `TestRealBoardDump`, which checks the pin table against a
 capture from an actual board — every pin decoding to its factory MAME default
@@ -148,14 +148,15 @@ is strong evidence the indices are right.
 
 ## Status
 
-Reading from a real board works, and the config it returns decodes to exactly
-the factory MAME layout — so the pin table, the code table and the transport
-are all confirmed against hardware.
+Reading from a real board works. The config it returns decodes to exactly the
+factory MAME layout, re-encodes byte-for-byte identically, and a single-field
+change moves exactly one byte — so the pin table, the code table, the
+transport and the read-modify-write model are all confirmed against hardware.
 
-Writing has **not** yet been done against a real board. `apply --dry-run`
-against one is the next step.
+Writing has **not** yet been done against a real board. `apply --dry-run` on
+the cabinet, then one harmless pin change, is the next step.
 
-Three bugs the hardware found, all fixed:
+Four bugs the hardware found, all fixed:
 
 1. The config goes out as an **output** report, not a feature report.
    Ultimarc's `wValue` 0x0203 is type 2 (Output); reading it as Feature made
@@ -165,3 +166,5 @@ Three bugs the hardware found, all fixed:
 3. Shift is **bit 6** of a pin's shift byte, not the whole byte. Real boards
    carry 0x01 there normally and 0x41 on the shift pin, so writing 0x00 would
    have cleared something the board cares about.
+4. Naming a pin in a profile without giving it an `action` silently **wiped**
+   that action. Only fields a profile actually names are written now.

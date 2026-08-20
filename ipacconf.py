@@ -420,7 +420,10 @@ def encode_config(profile: dict, base: bytes) -> bytearray:
         pin = named.get(name)
         if pin is None:
             continue  # not mentioned: leave the board's current value alone
-        data[ai] = _resolve(pin.get("action"), macro_codes)
+        # Only fields the profile actually names are touched - naming a pin to
+        # change its alternate must not silently clear its action.
+        if "action" in pin:
+            data[ai] = _resolve(pin.get("action"), macro_codes)
         if "alternate_action" in pin:
             data[alt_i] = _resolve(pin.get("alternate_action"), macro_codes)
         if "shift" in pin:

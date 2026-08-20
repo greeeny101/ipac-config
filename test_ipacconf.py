@@ -124,6 +124,23 @@ class TestEncodeDecode(unittest.TestCase):
         updated = ic.encode_config({"pins": [{"name": "1sw8", "action": ""}]}, self.raw)
         self.assertEqual(updated[4 + ic.PIN_TABLE["1sw8"][0]], 0)
 
+    def test_naming_a_pin_without_an_action_leaves_the_action_alone(self):
+        """Setting only an alternate must not wipe the pin's main action."""
+        before = self.raw[4 + ic.PIN_TABLE["1sw1"][0]]
+        updated = ic.encode_config(
+            {"pins": [{"name": "1sw1", "alternate_action": "F1"}]}, self.raw
+        )
+        self.assertEqual(updated[4 + ic.PIN_TABLE["1sw1"][0]], before)
+
+    def test_naming_a_pin_without_shift_leaves_the_shift_byte_alone(self):
+        base = bytearray(self.raw)
+        index = 4 + ic.PIN_TABLE["1sw1"][2]
+        base[index] = 0x41
+        updated = ic.encode_config(
+            {"pins": [{"name": "1sw1", "action": "A"}]}, bytes(base)
+        )
+        self.assertEqual(updated[index], 0x41)
+
     def test_unknown_pin_is_rejected(self):
         with self.assertRaises(ic.ProtocolError):
             ic.encode_config({"pins": [{"name": "3sw1", "action": "A"}]}, self.raw)
@@ -241,11 +258,10 @@ class TestDeframe(unittest.TestCase):
 
 
 class TestRealBoardDump(unittest.TestCase):
-    """Checks against a capture from Marc's board, firmware 1.44.
+    """Checks against a real board's config, read over USB. Firmware 1.44.
 
-    The fixture was taken before the framing bug was fixed, so its bytes
-    still carry a report id every fifth byte; the reconstruction below undoes
-    that. Replace it with a clean dump and this gets simpler.
+    This is the regression net for the pin and code tables: every pin
+    decoding to its factory MAME default is hard to achieve by accident.
     """
 
     @classmethod
@@ -254,15 +270,41 @@ class TestRealBoardDump(unittest.TestCase):
         path = os.path.join(here, "fixtures", "before-1.44.json")
         if not os.path.exists(path):
             raise unittest.SkipTest("no board dump present")
-        raw = bytes.fromhex(ic.load_profile(path)["raw"])
-        payload = bytes(b for i, b in enumerate(raw) if i % 5 != 4)
-        cls.header = payload[:4]
-        cls.data = payload[4:]
+        cls.raw = bytes.fromhex(ic.load_profile(path)["raw"])
+        cls.data = cls.raw[4:]
+
+    def test_the_dump_is_a_full_config(self):
+        self.assertEqual(len(self.raw), ic.CONFIG_SIZE)
+
+    def test_no_report_ids_left_in_the_data(self):
+        """The framing bug left an 0x03 every fifth byte."""
+        stride = 1 + ic.CHUNK
+        embedded = [i for i in range(4, len(self.raw), stride) if self.raw[i] == ic.REPORT_ID]
+        self.assertEqual(embedded, [])
 
     def test_response_header_carries_the_firmware(self):
-        self.assertEqual(self.header[0], 0x00)
-        self.assertEqual(self.header[1], 0x00)
-        self.assertEqual(self.header[2], 0x44)  # firmware 1.44
+        self.assertEqual(self.raw[0], 0x00)
+        self.assertEqual(self.raw[1], 0x00)
+        self.assertEqual(self.raw[2], 0x44)  # firmware 1.44
+
+    def test_every_pin_is_assigned(self):
+        profile = ic.decode_config(self.raw)
+        self.assertEqual(len(profile["pins"]), 32)
+
+    def test_read_modify_write_is_a_no_op_on_real_data(self):
+        """The property the whole safety model rests on."""
+        profile = ic.decode_config(self.raw)
+        again = bytes(ic.encode_config(profile, self.raw))
+        self.assertEqual(again[3:], self.raw[3:])
+        self.assertEqual(ic.diff_config(self.raw, again), [])
+
+    def test_changing_one_pin_moves_exactly_one_byte(self):
+        updated = ic.encode_config(
+            {"pins": [{"name": "1b", "alternate_action": "F1"}]}, self.raw
+        )
+        changes = ic.diff_config(self.raw, bytes(updated))
+        self.assertEqual(len(changes), 1)
+        self.assertEqual(changes[0]["meaning"], "1b alternate")
 
     def test_pin_table_matches_the_factory_mame_layout(self):
         """If an index were wrong, these would decode as garbage."""
