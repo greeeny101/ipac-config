@@ -1,0 +1,9 @@
+{
+  "_comment": "Reverts write-test.json by clearing pin 1b's shifted function. Only needed if you would rather not do a full `restore` from a dump.",
+  "schemaVersion": 2.0,
+  "resourceType": "ipac2-pins",
+  "deviceClass": "ipac2",
+  "pins": [
+    {"name": "1b", "alternate_action": ""}
+  ]
+}

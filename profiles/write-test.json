@@ -1,0 +1,9 @@
+{
+  "_comment": "Deliberately minimal: proves writing works by moving exactly ONE byte. Sets the shifted function of pin 1b (Start1 + 1b) to F1, leaving every key you actually play with untouched. Apply it, re-dump, and check the byte moved. To undo: `ipacconf.py restore fixtures/before-1.44.json`, or apply undo-write-test.json.",
+  "schemaVersion": 2.0,
+  "resourceType": "ipac2-pins",
+  "deviceClass": "ipac2",
+  "pins": [
+    {"name": "1b", "alternate_action": "F1"}
+  ]
+}
