@@ -44,10 +44,20 @@ PRODUCT_IPAC2 = 0x0420
 VENDOR_PRE2015 = 0xD208
 PRODUCT_PRE2015 = 0x0310
 
+# Multi-mode firmware (1.50+) reports the board's current mode in its product
+# id: switching with Start1+P1SW2 re-enumerates it as a different device. This
+# is why a keyboard-mode config and a Dinput-mode config read back identical -
+# the mode is not in the config block at all.
+IPAC2_MODES = {
+    0x0420: "keyboard",
+    0x0421: "Dinput game controller",
+}
+
 # Other 2015+ boards share this protocol but have different pin tables; we
 # recognise them only to give a clear "not supported" message.
 KNOWN_2015_PRODUCTS = {
     0x0420: "I-PAC 2",
+    0x0421: "I-PAC 2",
     0x0430: "I-PAC 4",
     0x0440: "Mini-PAC",
     0x0450: "J-PAC",
@@ -583,6 +593,17 @@ class DeviceInfo:
     def firmware(self):
         return "%d.%02x" % (self.bcd >> 8, self.bcd & 0xFF)
 
+    @property
+    def mode(self):
+        """Which mode the board is in - it is encoded in the product id."""
+        if self.vendor != VENDOR_2015:
+            return "unknown"
+        return IPAC2_MODES.get(self.product, "unknown (product %04x)" % self.product)
+
+    @property
+    def is_ipac2(self):
+        return self.vendor == VENDOR_2015 and self.product in IPAC2_MODES
+
     def as_dict(self):
         return {
             "path": self.path,
@@ -592,6 +613,7 @@ class DeviceInfo:
             "firmware": self.firmware,
             "firmware_note": firmware_note(self.bcd & 0xFF),
             "supports_gamepad": firmware_supports_gamepad(self.bcd & 0xFF),
+            "mode": self.mode,
             "interface": self.interface,
             "usb_path": self.usb_path,
         }
@@ -620,7 +642,9 @@ def find_devices(include_unsupported=False) -> list:
         vendor, product = int(vendor, 16), int(product, 16)
         if vendor not in (VENDOR_2015, VENDOR_PRE2015):
             continue
-        if not include_unsupported and (vendor, product) != (VENDOR_2015, PRODUCT_IPAC2):
+        if not include_unsupported and not (
+            vendor == VENDOR_2015 and product in IPAC2_MODES
+        ):
             continue
 
         bcd_text = _read_sysfs(os.path.join(usb_dir, "bcdDevice"), "0000")
@@ -666,7 +690,7 @@ def select_device(explicit_path=None) -> DeviceInfo:
         )
 
     legacy = [d for d in devices if d.vendor == VENDOR_PRE2015]
-    supported = [d for d in devices if (d.vendor, d.product) == (VENDOR_2015, PRODUCT_IPAC2)]
+    supported = [d for d in devices if d.is_ipac2]
     if not supported:
         if legacy:
             raise DeviceError(
@@ -687,12 +711,23 @@ def select_device(explicit_path=None) -> DeviceInfo:
                 return dev
         raise DeviceError("%s is not an I-PAC 2 config node" % explicit_path)
 
-    wanted = config_interface_for(supported[0].bcd & 0xFF)
-    for dev in supported:
-        if dev.interface == wanted:
-            return dev
-    # Firmware rule and reality disagree; fall back to probing.
-    return supported[-1]
+    return config_candidates(supported)[0]
+
+
+def config_candidates(devices: list) -> list:
+    """Order hidraw nodes by how likely they are to be the config interface.
+
+    The firmware rule in Ultimarc-linux predates mode switching, and a board
+    in Dinput mode presents four interfaces rather than three, so the rule is
+    a starting guess and the rest get probed.
+    """
+    if not devices:
+        return []
+    wanted = config_interface_for(devices[0].bcd & 0xFF)
+    return sorted(
+        devices,
+        key=lambda d: (d.interface != wanted, -d.interface),
+    )
 
 
 class Board:
@@ -859,9 +894,38 @@ class FakeBoard:
 
 
 def open_board(args):
+    """Open the board, probing for whichever interface answers."""
     if getattr(args, "fake_device", None):
         return FakeBoard(args.fake_device)
-    return Board(select_device(getattr(args, "device", None)))
+
+    explicit = getattr(args, "device", None)
+    if explicit:
+        return Board(select_device(explicit))
+
+    candidates = config_candidates([d for d in find_devices() if d.is_ipac2])
+    if not candidates:
+        select_device()  # raises with the right explanation
+    if len(candidates) == 1:
+        return Board(candidates[0])
+
+    tried = []
+    for info in candidates:
+        board = Board(info, timeout=0.75)
+        try:
+            board.read_config()
+        except (DeviceError, ProtocolError) as exc:
+            board.close()
+            tried.append("interface %d (%s)" % (info.interface, exc.__class__.__name__))
+            continue
+        board.timeout = 2.0
+        return board
+
+    raise DeviceError(
+        "no interface answered a config read. Tried: %s.\n"
+        "If the board is in Xinput mode the config interface is not exposed - "
+        "hold P1SW1 while plugging in USB to force it back to keyboard mode."
+        % ", ".join(tried)
+    )
 
 
 # --------------------------------------------------------------------------
@@ -994,6 +1058,7 @@ def cmd_list(args) -> int:
 
 def _print_device(dev: DeviceInfo):
     print("%s  %04x:%04x  %s" % (dev.path, dev.vendor, dev.product, dev.name))
+    print("  mode       %s" % dev.mode)
     print("  firmware   %s  (%s)" % (dev.firmware, firmware_note(dev.bcd & 0xFF)))
     print("  interface  %d" % dev.interface)
     print("  gamepad    %s" % ("yes" if firmware_supports_gamepad(dev.bcd & 0xFF) else "no"))

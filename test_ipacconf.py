@@ -443,6 +443,61 @@ class TestIoctlNumbers(unittest.TestCase):
             self.assertLess(op, 1 << 31)
 
 
+class TestModeDetection(unittest.TestCase):
+    """Multi-mode firmware reports the mode in the product id."""
+
+    @staticmethod
+    def _info(product, interface=2, bcd=0x0055):
+        return ic.DeviceInfo("/dev/hidraw0", ic.VENDOR_2015, product, bcd, interface, "1-1")
+
+    def test_keyboard_mode(self):
+        info = self._info(0x0420)
+        self.assertEqual(info.mode, "keyboard")
+        self.assertTrue(info.is_ipac2)
+
+    def test_dinput_mode(self):
+        info = self._info(0x0421)
+        self.assertEqual(info.mode, "Dinput game controller")
+        self.assertTrue(info.is_ipac2)
+
+    def test_an_unknown_mode_is_named_not_swallowed(self):
+        info = self._info(0x0422)
+        self.assertIn("0422", info.mode)
+        self.assertFalse(info.is_ipac2)
+
+    def test_another_board_is_not_an_ipac2(self):
+        self.assertFalse(self._info(0x0430).is_ipac2)  # I-PAC 4
+
+    def test_mode_is_reported_to_the_web_ui(self):
+        self.assertEqual(self._info(0x0421).as_dict()["mode"], "Dinput game controller")
+
+
+class TestConfigCandidates(unittest.TestCase):
+    """Dinput mode adds a fourth interface, so the firmware rule is a guess."""
+
+    @staticmethod
+    def _nodes(interfaces, bcd=0x0055):
+        return [
+            ic.DeviceInfo("/dev/hidraw%d" % i, ic.VENDOR_2015, 0x0421, bcd, i, "1-1")
+            for i in interfaces
+        ]
+
+    def test_the_firmware_rule_is_tried_first(self):
+        order = ic.config_candidates(self._nodes([0, 1, 2, 3]))
+        self.assertEqual(order[0].interface, 2)  # 0x55 -> interface 2
+
+    def test_every_interface_is_still_a_candidate(self):
+        order = ic.config_candidates(self._nodes([0, 1, 2, 3]))
+        self.assertEqual(sorted(d.interface for d in order), [0, 1, 2, 3])
+
+    def test_highest_interface_is_tried_before_the_low_ones(self):
+        order = ic.config_candidates(self._nodes([0, 1, 2, 3]))
+        self.assertEqual([d.interface for d in order], [2, 3, 1, 0])
+
+    def test_no_devices_is_not_an_error(self):
+        self.assertEqual(ic.config_candidates([]), [])
+
+
 class TestFakeBoard(unittest.TestCase):
     def setUp(self):
         self.dir = tempfile.mkdtemp()

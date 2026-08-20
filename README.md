@@ -122,6 +122,25 @@ Reading is a `0x59 0xdd 0x0f 0x00` request followed by an input report.
 Worked out from [Ultimarc-linux](https://github.com/katie-snow/Ultimarc-linux)
 (C) and [QtPyUltimarc](https://github.com/katie-snow/QtPyUltimarc) (Python).
 
+### Modes live in the product id, not the config
+
+Multi-mode firmware (1.50+) reports the board's current mode as a **different
+USB product id**, and switching with `Start1+P1SW2` re-enumerates it:
+
+| Product | Mode | Interfaces |
+|---|---|---|
+| `d209:0420` | keyboard | 3 |
+| `d209:0421` | Dinput game controller | 4 |
+
+This is why a keyboard-mode dump and a Dinput-mode dump are **byte-identical**
+— the mode is not in the 256-byte config at all. `list` reports it from the
+descriptor. Xinput presumably has its own id; unverified.
+
+Because Dinput adds a fourth interface, the `bcdDevice` rule from
+Ultimarc-linux (which predates mode switching) is treated as a first guess
+only: the tool probes each interface with a config read and uses whichever
+answers.
+
 ### The bootloader
 
 Putting a board into firmware-upgrade mode makes it re-enumerate as
@@ -156,7 +175,7 @@ real board ever disagrees.
 python3 -m unittest test_ipacconf.py
 ```
 
-73 tests, no hardware required. Two groups matter most:
+82 tests, no hardware required. Two groups matter most:
 `decode(encode(x)) == x` byte-for-byte, which is what makes read-modify-write
 trustworthy; and `TestRealBoardDump`, which checks the pin table against a
 capture from an actual board — every pin decoding to its factory MAME default
