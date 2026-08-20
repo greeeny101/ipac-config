@@ -1055,7 +1055,10 @@ def cmd_apply(args) -> int:
             print("backed up current config to %s" % path)
 
         board.write_config(updated)
-        print("wrote %d bytes to %s" % (len(updated), board.info.path))
+        print(
+            "wrote %d bytes in %d messages to %s"
+            % (WRITE_SIZE, WRITE_SIZE // CHUNK, board.info.path)
+        )
 
     return 0
 

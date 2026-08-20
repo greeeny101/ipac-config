@@ -155,8 +155,9 @@ factory MAME layout, re-encodes byte-for-byte identically, and a single-field
 change moves exactly one byte — so the pin table, the code table, the
 transport and the read-modify-write model are all confirmed against hardware.
 
-Writing reaches the board without error, but the first attempt did not
-persist — see bug 5. Retesting on hardware is the next step.
+Writing is confirmed too: a one-byte change applied to a real board, and a
+re-dump showed it had stuck. Read, write, diff, backup and restore have all
+now run against hardware.
 
 Five bugs the hardware found, all fixed:
 
