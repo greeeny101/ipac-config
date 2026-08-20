@@ -230,6 +230,35 @@ class TestFirmwareRules(unittest.TestCase):
             self.assertTrue(ic.firmware_note(bcd))
 
 
+class TestWriteFrames(unittest.TestCase):
+    """A short write is accepted message by message and then discarded."""
+
+    def setUp(self):
+        self.frames = ic.write_frames(ic.default_config())
+
+    def test_sixty_five_messages_not_sixty_four(self):
+        self.assertEqual(ic.WRITE_SIZE, 260)
+        self.assertEqual(len(self.frames), 65)
+
+    def test_every_frame_is_a_five_byte_report(self):
+        for i, frame in enumerate(self.frames):
+            with self.subTest(frame=i):
+                self.assertEqual(len(frame), 1 + ic.CHUNK)
+                self.assertEqual(frame[0], ic.REPORT_ID)
+
+    def test_first_frame_carries_the_write_header(self):
+        self.assertEqual(tuple(self.frames[0][1:4]), ic.HEADER_WRITE)
+
+    def test_the_padding_is_zeros(self):
+        self.assertEqual(self.frames[-1][1:], b"\x00" * ic.CHUNK)
+
+    def test_the_config_survives_the_framing(self):
+        config = ic.default_config()
+        sent = ic.deframe(b"".join(self.frames))
+        self.assertEqual(sent[:ic.CONFIG_SIZE], config)
+        self.assertEqual(len(sent), ic.WRITE_SIZE)
+
+
 class TestDeframe(unittest.TestCase):
     """The board answers in 5-byte reports, each prefixed with its id."""
 

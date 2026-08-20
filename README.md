@@ -109,7 +109,9 @@ from a keyboard encoder — pair that with sensible keycodes written by this too
 
 ## Protocol
 
-2015+ boards take a 256-byte config as 4-byte chunks inside HID **output**
+Reads return 256 bytes; writes send 260 (`IPACSERIES_SIZE`), the last four
+being zero padding — a short write is silently discarded.
+2015+ boards take the config as 4-byte chunks inside HID **output**
 reports (report id 3) — `HIDIOCSOUTPUT` on the hidraw node for the config
 interface. Ultimarc's `wValue` of `0x0203` is `(report_type << 8) | report_id`,
 and type 2 is Output, not Feature; sending it as a Feature report makes the
@@ -140,7 +142,7 @@ real board ever disagrees.
 python3 -m unittest test_ipacconf.py
 ```
 
-68 tests, no hardware required. Two groups matter most:
+73 tests, no hardware required. Two groups matter most:
 `decode(encode(x)) == x` byte-for-byte, which is what makes read-modify-write
 trustworthy; and `TestRealBoardDump`, which checks the pin table against a
 capture from an actual board — every pin decoding to its factory MAME default
@@ -153,10 +155,10 @@ factory MAME layout, re-encodes byte-for-byte identically, and a single-field
 change moves exactly one byte — so the pin table, the code table, the
 transport and the read-modify-write model are all confirmed against hardware.
 
-Writing has **not** yet been done against a real board. `apply --dry-run` on
-the cabinet, then one harmless pin change, is the next step.
+Writing reaches the board without error, but the first attempt did not
+persist — see bug 5. Retesting on hardware is the next step.
 
-Four bugs the hardware found, all fixed:
+Five bugs the hardware found, all fixed:
 
 1. The config goes out as an **output** report, not a feature report.
    Ultimarc's `wValue` 0x0203 is type 2 (Output); reading it as Feature made
@@ -168,3 +170,6 @@ Four bugs the hardware found, all fixed:
    have cleared something the board cares about.
 4. Naming a pin in a profile without giving it an `action` silently **wiped**
    that action. Only fields a profile actually names are written now.
+5. A write is **260 bytes, not 256** — four longer than a read response, so 65
+   messages rather than 64. The board accepts a short write message by message
+   and then discards it, committing nothing: no error, no change.

@@ -58,8 +58,15 @@ KNOWN_2015_PRODUCTS = {
 # --------------------------------------------------------------------------
 
 REPORT_ID = 0x03
-CONFIG_SIZE = 256  # 4 byte header + 252 data bytes
+CONFIG_SIZE = 256  # what a read returns: 4 byte header + 252 data bytes
 CHUNK = 4  # config is sent 4 bytes at a time, in 5 byte output reports
+
+# A write is four bytes longer than a read response. Ultimarc-linux sends
+# IPACSERIES_SIZE (260) - see ipac.c, which callocs 260 and passes that to
+# writeIPACSeriesUSB - and the board waits for all 65 messages before
+# committing to flash. Sending only 256 is accepted message by message and
+# then silently discarded, which is exactly how this was found.
+WRITE_SIZE = 260
 
 HEADER_WRITE = (0x50, 0xDD, 0x0F)  # 4th byte is the config bitfield
 HEADER_READ = (0x59, 0xDD, 0x0F, 0x00)
@@ -264,6 +271,15 @@ class DeviceError(Exception):
 # --------------------------------------------------------------------------
 # Config encode / decode - pure functions over a 256 byte buffer
 # --------------------------------------------------------------------------
+
+
+def write_frames(buf: bytes) -> list:
+    """The 5-byte messages that carry a config to the board."""
+    padded = bytes(buf[:CONFIG_SIZE]).ljust(WRITE_SIZE, b"\x00")
+    return [
+        bytes([REPORT_ID]) + padded[pos:pos + CHUNK]
+        for pos in range(0, WRITE_SIZE, CHUNK)
+    ]
 
 
 def deframe(chunk: bytes) -> bytes:
@@ -764,9 +780,8 @@ class Board:
         )
 
     def _send_block(self, buf: bytes):
-        for pos in range(0, len(buf), CHUNK):
-            chunk = bytes(buf[pos:pos + CHUNK]).ljust(CHUNK, b"\x00")
-            self._send_feature(bytes([REPORT_ID]) + chunk)
+        for frame in write_frames(buf):
+            self._send_feature(frame)
 
     def read_config(self) -> bytes:
         """Ask the board for its config and read it back."""
