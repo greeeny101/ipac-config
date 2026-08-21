@@ -14,6 +14,7 @@ Batocera box, whose root filesystem is read-only and has no pip.
     ipacconf.py apply p.json             # write it (backs up first)
     ipacconf.py restore before.json      # byte-exact restore
     ipacconf.py saved                    # list backups and presets
+    ipacconf.py monitor                  # name the pin behind each button press
     ipacconf.py serve                    # web UI on :8080
 
 Protocol sources: katie-snow/Ultimarc-linux (C) and katie-snow/QtPyUltimarc
@@ -29,9 +30,12 @@ import errno
 import glob
 import json
 import os
+import queue
 import re
 import select
+import struct
 import sys
+import threading
 import time
 
 __version__ = "0.1.0"
@@ -564,15 +568,18 @@ _IOC_WRITE = 1
 _IOC_READ = 2
 
 
-def _iowr(type_char: str, nr: int, size: int) -> int:
-    value = (
-        ((_IOC_READ | _IOC_WRITE) << 30)
-        | (size << 16)
-        | (ord(type_char) << 8)
-        | nr
-    )
+def _ioc(direction: int, type_char: str, nr: int, size: int) -> int:
+    value = (direction << 30) | (size << 16) | (ord(type_char) << 8) | nr
     # fcntl.ioctl wants this as a signed int on some Python builds.
     return ctypes.c_int32(value).value
+
+
+def _iowr(type_char: str, nr: int, size: int) -> int:
+    return _ioc(_IOC_READ | _IOC_WRITE, type_char, nr, size)
+
+
+def _iow(type_char: str, nr: int, size: int) -> int:
+    return _ioc(_IOC_WRITE, type_char, nr, size)
 
 
 class DeviceInfo:
@@ -937,6 +944,606 @@ def open_board(args):
         "hold P1SW1 while plugging in USB to force it back to keyboard mode."
         % ", ".join(tried)
     )
+
+
+# --------------------------------------------------------------------------
+# Input monitor
+# --------------------------------------------------------------------------
+#
+# Reading the config tells you what each pin is *supposed* to send. It cannot
+# tell you which physical button is wired to which pin - and that is exactly
+# what has gone wrong when an action turns up on the wrong control.
+#
+# The board is a keyboard (or, in Dinput mode, two gamepads), so every press
+# raises a Linux input event. Reverse-mapping that event through the config we
+# just read names the pin. Pressing a button on the panel and pressing one
+# while EmulationStation is asking for it are the same event, so a single
+# monitor answers both directions of the question.
+#
+# We read /dev/input/event* directly rather than through python-evdev: same
+# stdlib-only constraint as the rest of the tool.
+
+EV_SYN = 0x00
+EV_KEY = 0x01
+EV_REL = 0x02
+EV_ABS = 0x03
+
+BTN_MOUSE = 0x110  # BTN_LEFT, then BTN_RIGHT and BTN_MIDDLE
+BTN_JOYSTICK = 0x120  # BTN_TRIGGER; joystick buttons run upwards from here
+BTN_LAST = 0x140  # one past BTN_THUMBR - 0x120..0x13f is exactly 32 buttons
+
+REL_X = 0x00
+ABS_HAT0X = 0x10
+
+# struct input_event, from linux/input.h: a struct timeval (two longs) then
+# __u16 type, __u16 code, __s32 value. That is 24 bytes on 64-bit and 16 on
+# 32-bit, so derive it rather than hardcoding - Batocera also ships for ARM.
+INPUT_EVENT_FORMAT = "@llHHi"
+INPUT_EVENT_SIZE = struct.calcsize(INPUT_EVENT_FORMAT)
+
+# EVIOCGRAB = _IOW('E', 0x90, int): take exclusive control of a device, so
+# presses stop reaching EmulationStation while you are testing them. The
+# kernel drops the grab when the fd closes, so there is no cleanup path to get
+# wrong - stopping the monitor is enough.
+EVIOCGRAB_NR = 0x90
+
+# The kernel's own HID-usage -> Linux-keycode table, verbatim from
+# drivers/hid/usbhid/usbkbd.c (usb_kbd_keycode), indexed by HID usage ID.
+# Inverting it gives the direction we need. Taking it from the kernel rather
+# than writing one out by hand means it agrees with whatever the kernel did to
+# produce the event we are trying to reverse.
+USB_KBD_KEYCODE = [
+      0,   0,   0,   0,  30,  48,  46,  32,  18,  33,  34,  35,  23,  36,  37,  38,
+     50,  49,  24,  25,  16,  19,  31,  20,  22,  47,  17,  45,  21,  44,   2,   3,
+      4,   5,   6,   7,   8,   9,  10,  11,  28,   1,  14,  15,  57,  12,  13,  26,
+     27,  43,  43,  39,  40,  41,  51,  52,  53,  58,  59,  60,  61,  62,  63,  64,
+     65,  66,  67,  68,  87,  88,  99,  70, 119, 110, 102, 104, 111, 107, 109, 106,
+    105, 108, 103,  69,  98,  55,  74,  78,  96,  79,  80,  81,  75,  76,  77,  71,
+     72,  73,  82,  83,  86, 127, 116, 117, 183, 184, 185, 186, 187, 188, 189, 190,
+    191, 192, 193, 194, 134, 138, 130, 132, 128, 129, 131, 137, 133, 135, 136, 113,
+    115, 114,   0,   0,   0, 121,   0,  89,  93, 124,  92,  94,  95,   0,   0,   0,
+    122, 123,  90,  91,  85,   0,   0,   0,   0,   0,   0,   0,   0,   0,   0,   0,
+      0,   0,   0,   0,   0,   0,   0,   0,   0,   0,   0,   0,   0,   0,   0,   0,
+      0,   0,   0,   0,   0,   0,   0,   0,   0,   0,   0,   0,   0,   0,   0,   0,
+      0,   0,   0,   0,   0,   0,   0,   0,   0,   0,   0,   0,   0,   0,   0,   0,
+      0,   0,   0,   0,   0,   0,   0,   0,   0,   0,   0,   0,   0,   0,   0,   0,
+     29,  42,  56, 125,  97,  54, 100, 126, 164, 166, 165, 163, 161, 115, 114, 113,
+    150, 158, 159, 128, 136, 177, 178, 176, 142, 152, 173, 140,   0,   0,   0,   0,
+]
+
+# Ultimarc keeps the modifiers at 0x70-0x77 rather than HID's own 0xe0-0xe7,
+# so a press of the pin holding "CTRL L" (0x70) arrives as HID usage 0xe0.
+# The two runs are in the same order, so the fixup is a straight offset.
+HID_MODIFIER_FIRST = 0xE0
+BOARD_MODIFIER_FIRST = 0x70
+
+# Above 0x67 the board stops speaking HID usage IDs and uses its own
+# numbering - modifiers at 0x70, mouse at 0x80, system at 0x88, gamepad at
+# 0x90. The kernel table still has real HID usages up there (F21-F24, the
+# international and language keys), and taking them at face value would report
+# a press of F21 as "CTRL L" and a Katakana key as "POWER". So the straight
+# usage-is-the-byte reading only holds below here.
+BOARD_PRIVATE_FIRST = 0x68
+
+# Media keys are not HID keyboard usages at all - they arrive on the board's
+# consumer-control interface, and Ultimarc numbers them its own way. Only the
+# ones the board can actually be programmed with are worth listing.
+LINUX_TO_BOARD_MEDIA = {
+    113: SYSTEM_CODES["MUTE"],
+    115: SYSTEM_CODES["VOL UP"],
+    114: SYSTEM_CODES["VOL DOWN"],
+    164: SYSTEM_CODES["PLAY/PAUSE"],
+    163: SYSTEM_CODES["NEXT"],
+    165: SYSTEM_CODES["PREV"],
+    166: SYSTEM_CODES["STOP"],
+    116: SYSTEM_CODES["POWER"],
+    142: SYSTEM_CODES["SLEEP"],
+    143: SYSTEM_CODES["WAKE"],
+    155: SYSTEM_CODES["EMAIL"],
+    217: SYSTEM_CODES["SEARCH"],
+    156: SYSTEM_CODES["BOOKMARKS"],
+    150: SYSTEM_CODES["OPEN BROWSER"],
+    158: SYSTEM_CODES["WEB BACK"],
+    159: SYSTEM_CODES["WEB FORWARD"],
+    128: SYSTEM_CODES["WEB STOP"],
+    173: SYSTEM_CODES["WEB REFRESH"],
+    140: SYSTEM_CODES["CALCULATOR"],
+    226: SYSTEM_CODES["MEDIA PLAYER"],
+    144: SYSTEM_CODES["EXPLORER"],
+}
+
+
+def _build_linux_to_board() -> dict:
+    """Linux keycode -> the byte the board would be programmed with."""
+    table = {}
+    for usage, keycode in enumerate(USB_KBD_KEYCODE):
+        if not keycode:
+            continue
+        if HID_MODIFIER_FIRST <= usage < HID_MODIFIER_FIRST + 8:
+            table.setdefault(
+                keycode, usage - HID_MODIFIER_FIRST + BOARD_MODIFIER_FIRST
+            )
+        elif usage < BOARD_PRIVATE_FIRST:
+            # Earliest usage wins: 0x31 and 0x32 both give KEY_BACKSLASH, and
+            # 0x31 decodes back to "\" rather than "NON US #".
+            table.setdefault(keycode, usage)
+    # The media keys are not HID keyboard usages at all, so the kernel table
+    # has nothing useful to say about them.
+    table.update(LINUX_TO_BOARD_MEDIA)
+    # A byte the board cannot hold is worse than no answer - it would name a
+    # pin that cannot be carrying it.
+    return {k: v for k, v in table.items() if v in CODE_NAMES}
+
+
+LINUX_TO_BOARD = _build_linux_to_board()
+BOARD_TO_LINUX = {}
+for _keycode, _value in LINUX_TO_BOARD.items():
+    BOARD_TO_LINUX.setdefault(_value, _keycode)
+
+
+def parse_input_events(blob: bytes) -> list:
+    """Split one read() from an event node into (sec, usec, type, code, value).
+
+    A partial trailing record is dropped. The kernel only ever hands out whole
+    events, so this is belt and braces.
+    """
+    size = INPUT_EVENT_SIZE
+    return [
+        struct.unpack(INPUT_EVENT_FORMAT, blob[start : start + size])
+        for start in range(0, len(blob) - size + 1, size)
+    ]
+
+
+def event_action(etype: int, code: int):
+    """(kind, board byte) for an evdev event; the byte is None if unmapped."""
+    if etype == EV_KEY:
+        if code < BTN_MOUSE:
+            return "key", LINUX_TO_BOARD.get(code)
+        if BTN_MOUSE <= code < BTN_MOUSE + 3:
+            # BTN_LEFT/RIGHT/MIDDLE against MOUSE L/R/M.
+            return "mouse", (MOUSE_CODES["MOUSE L"], MOUSE_CODES["MOUSE R"],
+                             MOUSE_CODES["MOUSE M"])[code - BTN_MOUSE]
+        if BTN_JOYSTICK <= code < BTN_LAST:
+            # 0x120..0x13f is exactly 32 codes, against GAMEPAD 1..32. This
+            # assumes hid-input numbered the board's buttons from BTN_TRIGGER,
+            # which is what it does for a device that presents as a joystick.
+            # Every event carries its raw code, so if a real board in Dinput
+            # mode disagrees the offset is visible rather than silent.
+            return "gamepad", GAME_CODES["GAMEPAD %d" % (code - BTN_JOYSTICK + 1)]
+        return "button", None
+    if etype == EV_ABS:
+        if ABS_HAT0X <= code < ABS_HAT0X + 4:
+            return "hat", GAME_CODES["HAT %d" % (code - ABS_HAT0X)]
+        if code < 8:
+            return "analog", GAME_CODES["ANALOG %d" % code]
+        return "axis", None
+    if etype == EV_REL:
+        if code < 2:
+            return "trackball", GAME_CODES["TRACKBALL %s" % ("X1", "Y1")[code - REL_X]]
+        return "relative", None
+    return "other", None
+
+
+def pins_for_action(profile, name, player=None) -> list:
+    """Every pin whose action or alternate action is `name`.
+
+    More than one pin can carry the same code, in which case they are all
+    returned - an ambiguous answer still narrows the search, and saying so is
+    better than picking one at random.
+    """
+    if not profile or not name:
+        return []
+    hits = []
+    for pin in profile.get("pins") or []:
+        for field in ("action", "alternate_action"):
+            if pin.get(field) != name:
+                continue
+            hits.append({"pin": pin.get("name"), "field": field})
+            break  # a pin whose alternate repeats its action is still one pin
+    if player and len(hits) > 1:
+        # In Dinput mode both players' buttons share the GAMEPAD 1..32 code
+        # space, so the code alone cannot say who pressed it. Which event node
+        # it arrived on can.
+        narrowed = [h for h in hits if str(h["pin"] or "").startswith(str(player))]
+        if narrowed:
+            return narrowed
+    return hits
+
+
+class InputDevice:
+    """One /dev/input/eventN node belonging to a board we care about."""
+
+    def __init__(self, path, name, vendor, product, interface, joystick):
+        self.path = path
+        self.name = name
+        self.vendor = vendor
+        self.product = product
+        self.interface = interface
+        self.joystick = joystick
+        self.player = None  # filled in for joystick nodes, in interface order
+
+    @property
+    def node(self):
+        return os.path.basename(self.path)
+
+    def as_dict(self):
+        return {
+            "path": self.path,
+            "node": self.node,
+            "name": self.name,
+            "interface": self.interface,
+            "player": self.player,
+        }
+
+
+def _ancestor_with(path: str, filename: str, limit: int = 8):
+    """Walk up from `path` for a directory holding `filename`."""
+    current = path
+    for _ in range(limit):
+        parent = os.path.dirname(current)
+        if not parent or parent == current or parent == "/":
+            return None
+        current = parent
+        if os.path.exists(os.path.join(current, filename)):
+            return current
+    return None
+
+
+def find_input_devices(all_devices=False, sys_root="/sys") -> list:
+    """Event nodes for the board, or for everything if all_devices."""
+    found = []
+    pattern = os.path.join(sys_root, "class", "input", "event*")
+    for node in sorted(glob.glob(pattern), key=lambda p: _node_index(p)):
+        dev_dir = os.path.realpath(os.path.join(node, "device"))
+        vendor = _read_sysfs(os.path.join(dev_dir, "id", "vendor"))
+        product = _read_sysfs(os.path.join(dev_dir, "id", "product"))
+        if vendor is None or product is None:
+            continue
+        try:
+            vendor, product = int(vendor, 16), int(product, 16)
+        except ValueError:
+            continue
+        ours = vendor == VENDOR_2015 and product in IPAC2_MODES
+        if not ours and not all_devices:
+            continue
+
+        iface_dir = _ancestor_with(dev_dir, "bInterfaceNumber")
+        interface = -1
+        if iface_dir:
+            try:
+                interface = int(_read_sysfs(
+                    os.path.join(iface_dir, "bInterfaceNumber"), "-1"), 16)
+            except ValueError:
+                interface = -1
+
+        # A node with absolute axes is a stick or pad rather than the
+        # keyboard, which is what tells the two Dinput players apart.
+        abs_caps = _read_sysfs(os.path.join(dev_dir, "capabilities", "abs"), "0")
+        joystick = any(int(word, 16) for word in (abs_caps or "0").split() if word)
+
+        found.append(
+            InputDevice(
+                path=os.path.join("/dev", "input", os.path.basename(node)),
+                name=_read_sysfs(os.path.join(dev_dir, "name"), "unknown device"),
+                vendor=vendor,
+                product=product,
+                interface=interface,
+                joystick=joystick,
+            )
+        )
+
+    pads = sorted([d for d in found if d.joystick and d.vendor == VENDOR_2015],
+                  key=lambda d: (d.interface, d.path))
+    for index, dev in enumerate(pads):
+        dev.player = index + 1
+    return found
+
+
+def _node_index(path: str) -> int:
+    match = re.search(r"(\d+)$", path)
+    return int(match.group(1)) if match else 0
+
+
+EVENT_BUFFER = 200
+
+
+class EventStream:
+    """Ring buffer plus subscriber fan-out. No I/O, so tests can drive it."""
+
+    def __init__(self, size=EVENT_BUFFER):
+        self.size = size
+        self._lock = threading.Lock()
+        self._events = []
+        self._seq = 0
+        self._subscribers = set()
+
+    def publish(self, event: dict) -> dict:
+        with self._lock:
+            self._seq += 1
+            event = dict(event, seq=self._seq)
+            self._events.append(event)
+            if len(self._events) > self.size:
+                del self._events[: -self.size]
+            subscribers = list(self._subscribers)
+        for sub in subscribers:
+            try:
+                sub.put_nowait(event)
+            except queue.Full:
+                pass  # a stalled reader loses events; the board never waits
+        return event
+
+    def since(self, seq: int) -> list:
+        with self._lock:
+            return [e for e in self._events if e["seq"] > seq]
+
+    @property
+    def latest(self) -> int:
+        with self._lock:
+            return self._seq
+
+    def subscribe(self, maxsize=256) -> queue.Queue:
+        sub = queue.Queue(maxsize)
+        with self._lock:
+            self._subscribers.add(sub)
+        return sub
+
+    def unsubscribe(self, sub) -> None:
+        with self._lock:
+            self._subscribers.discard(sub)
+
+
+class BaseMonitor:
+    """Shared translation and lifecycle. Subclasses provide the events."""
+
+    def __init__(self, devices, stream=None, profile=None):
+        self.devices = list(devices)
+        self.stream = stream or EventStream()
+        self.profile = profile
+        self.error = None
+        self._rest = {}  # (node, axis) -> the value that counts as "not held"
+        self._held = {}  # (node, axis) -> whether it is away from rest
+        self._thread = None
+        self._stop = threading.Event()
+
+    # -- lifecycle
+
+    def start(self):
+        self._open()
+        self._thread = threading.Thread(target=self._run, daemon=True)
+        self._thread.start()
+        return self
+
+    def close(self):
+        self._stop.set()
+        thread, self._thread = self._thread, None
+        if thread is not None and thread is not threading.current_thread():
+            thread.join(timeout=2.0)
+        self._close()
+
+    def __enter__(self):
+        return self.start()
+
+    def __exit__(self, *exc):
+        self.close()
+
+    def _open(self):
+        pass
+
+    def _close(self):
+        pass
+
+    def _run(self):
+        raise NotImplementedError("a monitor subclass provides the events")
+
+    # -- translation
+
+    def translate(self, device, etype, code, value):
+        """One evdev event as a payload dict, or None if not worth reporting."""
+        if etype == EV_SYN:
+            return None
+        if etype == EV_KEY and value == 2:
+            return None  # autorepeat, which would flood a held button
+
+        kind, board_code = event_action(etype, code)
+
+        if etype == EV_ABS:
+            # Axes have no press/release; the value they sit at when nothing is
+            # touched counts as released. Taking the first value seen as that
+            # resting point works for sticks centred at 0 and at 128 alike.
+            key = (device.node, code)
+            rest = self._rest.setdefault(key, value)
+            held = value != rest
+            if held == self._held.get(key, False):
+                return None  # jitter, or the axis settling back
+            self._held[key] = held
+        else:
+            held = value != 0
+
+        name = code_to_name(board_code) if board_code is not None else None
+        player = device.player if kind in ("gamepad", "hat", "analog") else None
+        return {
+            "ts": time.time(),
+            "device": device.path,
+            "node": device.node,
+            "source": device.name,
+            "player": player,
+            "kind": kind,
+            "raw": code,
+            "type": etype,
+            "value": value,
+            "held": held,
+            "name": name,
+            "code": board_code,
+            "pins": pins_for_action(self.profile, name, player),
+        }
+
+    def _emit(self, device, etype, code, value):
+        event = self.translate(device, etype, code, value)
+        if event is not None:
+            self.stream.publish(event)
+
+
+class InputMonitor(BaseMonitor):
+    """Reads the board's evdev nodes in a background thread."""
+
+    POLL = 0.25  # how often the loop notices it has been asked to stop
+    BATCH = 64  # events per read()
+
+    def __init__(self, devices, grab=False, stream=None, profile=None):
+        super().__init__(devices, stream=stream, profile=profile)
+        self.grab = grab
+        self._fds = {}
+
+    def _open(self):
+        import fcntl  # Linux only; imported late so the module loads anywhere
+
+        if not self.devices:
+            raise DeviceError(
+                "no input devices to watch - the board is attached (the "
+                "config read works) but no /dev/input/event node belongs to "
+                "it. Check `ls /dev/input/by-id | grep -i ultimarc`."
+            )
+        for dev in self.devices:
+            try:
+                fd = os.open(dev.path, os.O_RDONLY | os.O_NONBLOCK)
+            except OSError as exc:
+                self._close()
+                raise DeviceError("cannot open %s: %s" % (dev.path, exc))
+            self._fds[fd] = dev
+            if not self.grab:
+                continue
+            try:
+                fcntl.ioctl(fd, _iow("E", EVIOCGRAB_NR, 4), 1)
+            except OSError as exc:
+                self._close()
+                raise DeviceError(
+                    "cannot take exclusive control of %s: %s. Something else "
+                    "already holds it - stop the other reader, or watch "
+                    "without exclusive capture." % (dev.path, exc)
+                )
+
+    def _close(self):
+        for fd in list(self._fds):
+            # Closing the fd is what releases any grab, so there is nothing
+            # else to undo here.
+            try:
+                os.close(fd)
+            except OSError:
+                pass
+            del self._fds[fd]
+
+    def _run(self):
+        while not self._stop.is_set():
+            try:
+                ready, _, _ = select.select(list(self._fds), [], [], self.POLL)
+            except (OSError, ValueError):
+                return  # the fds went away under us, which means close()
+            for fd in ready:
+                device = self._fds.get(fd)
+                if device is None:
+                    continue
+                try:
+                    blob = os.read(fd, INPUT_EVENT_SIZE * self.BATCH)
+                except OSError as exc:
+                    if exc.errno in (errno.EAGAIN, errno.EINTR):
+                        continue
+                    self.error = "%s: %s" % (device.path, exc)
+                    return
+                for _sec, _usec, etype, code, value in parse_input_events(blob):
+                    self._emit(device, etype, code, value)
+
+
+class FakeInputMonitor(BaseMonitor):
+    """Replays a JSONL script, so the UI can be built without a cabinet.
+
+    Each line is one event. Either name a board action, which is turned back
+    into the keycode the kernel would have reported so the whole translation
+    path is exercised:
+
+        {"after": 0.4, "action": "5", "value": 1}
+
+    or give the raw evdev numbers directly:
+
+        {"after": 0.1, "type": 3, "code": 16, "value": -1}
+    """
+
+    def __init__(self, path, stream=None, profile=None, loop=True):
+        self.path = path
+        self.loop = loop
+        super().__init__([_fake_device(path)], stream=stream, profile=profile)
+        self.script = self._load()
+
+    def _load(self):
+        steps = []
+        with open(self.path) as handle:
+            for number, line in enumerate(handle, 1):
+                line = line.strip()
+                if not line or line.startswith("#"):
+                    continue
+                try:
+                    step = json.loads(line)
+                except ValueError as exc:
+                    raise ProtocolError(
+                        "%s line %d: %s" % (self.path, number, exc)
+                    )
+                if "action" in step:
+                    code = BOARD_TO_LINUX.get(name_to_code(step["action"]))
+                    if code is None:
+                        raise ProtocolError(
+                            "%s line %d: %r is not something a keyboard can "
+                            "send" % (self.path, number, step["action"])
+                        )
+                    step.setdefault("type", EV_KEY)
+                    step["code"] = code
+                steps.append(step)
+        if not steps:
+            raise ProtocolError("%s has no events in it" % self.path)
+        return steps
+
+    def _run(self):
+        while not self._stop.is_set():
+            for step in self.script:
+                if self._stop.wait(float(step.get("after", 0.5))):
+                    return
+                self._emit(
+                    self.devices[0],
+                    int(step.get("type", EV_KEY)),
+                    int(step["code"]),
+                    int(step.get("value", 1)),
+                )
+            if not self.loop:
+                return
+
+
+def _fake_device(path) -> InputDevice:
+    device = InputDevice(
+        path=path, name="scripted input (%s)" % os.path.basename(path),
+        vendor=VENDOR_2015, product=PRODUCT_IPAC2, interface=0, joystick=False,
+    )
+    device.player = 1
+    return device
+
+
+def open_monitor(args, profile=None, stream=None):
+    """The monitor the CLI and the web UI both want."""
+    fake = getattr(args, "fake_input", None)
+    if fake:
+        return FakeInputMonitor(fake, stream=stream, profile=profile)
+    if sys.platform != "linux":
+        raise DeviceError(
+            "watching the panel needs Linux (/dev/input). Use --fake-input "
+            "with a script to work on this machine."
+        )
+    devices = find_input_devices(all_devices=getattr(args, "all_devices", False))
+    return InputMonitor(
+        devices, grab=getattr(args, "grab", False), stream=stream, profile=profile
+    )
+
+
+def sse_frame(payload, name=None) -> bytes:
+    """One server-sent event. Kept pure so the framing can be tested."""
+    head = "event: %s\n" % name if name else ""
+    return ("%sdata: %s\n\n" % (head, json.dumps(payload))).encode()
 
 
 # --------------------------------------------------------------------------
@@ -1459,8 +2066,106 @@ def cmd_saved(args) -> int:
     return 0
 
 
+def read_profile_quietly(args):
+    """The board's current config, or None with a note on stderr.
+
+    The monitor is still useful without it - it just reports raw codes rather
+    than naming pins - so a board that will not answer is not fatal here.
+    """
+    try:
+        with open_board(args) as board:
+            return decode_config(board.read_config())
+    except (DeviceError, ProtocolError) as exc:
+        print(
+            "cannot read the board's config, so presses will not be matched "
+            "to pins: %s" % exc,
+            file=sys.stderr,
+        )
+        return None
+
+
+def monitor_line(event: dict) -> str:
+    """One press as a line of terminal output."""
+    when = datetime.datetime.fromtimestamp(event["ts"]).strftime("%H:%M:%S")
+    what = event["name"] or "%s %d" % (event["kind"], event["raw"])
+    if event["code"] is not None:
+        what += " (0x%02x)" % event["code"]
+    if event["pins"]:
+        where = " ".join(
+            pin["pin"] if pin["field"] == "action" else "%s (shifted)" % pin["pin"]
+            for pin in event["pins"]
+        )
+        if len(event["pins"]) > 1:
+            where += "  <- several pins carry this code"
+    elif event["name"]:
+        where = "-- no pin carries this code"
+    else:
+        where = "-- not an action the board can be programmed with"
+    return "%s  %-4s %-22s %-30s %s" % (
+        when, "down" if event["held"] else "up", what, where, event["node"]
+    )
+
+
+def cmd_monitor(args) -> int:
+    profile = read_profile_quietly(args)
+    try:
+        monitor = open_monitor(args, profile=profile)
+        monitor.start()
+    except (DeviceError, ProtocolError) as exc:
+        print("error: %s" % exc, file=sys.stderr)
+        return 1
+
+    for device in monitor.devices:
+        print("watching %s  %s%s" % (
+            device.path, device.name,
+            " (player %d)" % device.player if device.player else "",
+        ))
+    if getattr(args, "grab", False):
+        print("exclusive capture is on - presses will NOT reach Batocera")
+    print("press a control on the panel; ctrl-c to stop")
+    print()
+
+    stream = monitor.stream.subscribe()
+    try:
+        while True:
+            try:
+                print(monitor_line(stream.get(timeout=0.5)))
+            except queue.Empty:
+                if monitor.error:
+                    print("error: %s" % monitor.error, file=sys.stderr)
+                    return 1
+    except KeyboardInterrupt:
+        print()
+    finally:
+        monitor.stream.unsubscribe(stream)
+        monitor.close()
+    return 0
+
+
 def cmd_serve(args) -> int:
     return serve(args)
+
+
+def _add_input_args(parser):
+    """Options for the input monitor, shared by `monitor` and `serve`."""
+    parser.add_argument(
+        "--fake-input",
+        metavar="FILE",
+        help="replay a JSONL script instead of reading /dev/input "
+             "(for development off the cabinet)",
+    )
+    parser.add_argument(
+        "--all-devices",
+        action="store_true",
+        help="watch every input device, not just the board - use this to "
+             "prove a press came from some other controller",
+    )
+    parser.add_argument(
+        "--grab",
+        action="store_true",
+        help="take exclusive control, so presses do not also reach "
+             "EmulationStation while you test them",
+    )
 
 
 def _add_device_args(parser, suppress=False):
@@ -1522,10 +2227,22 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--backup-dir")
     p.set_defaults(func=cmd_saved)
 
+    p = sub.add_parser(
+        "monitor",
+        help="name the pin behind each button press",
+        parents=[common],
+        description="Watch the board's input events and say which pin each "
+                    "press came from. This is how you find an action that "
+                    "has been assigned to the wrong pin.",
+    )
+    _add_input_args(p)
+    p.set_defaults(func=cmd_monitor)
+
     p = sub.add_parser("serve", help="run the web UI", parents=[common])
     p.add_argument("--port", type=int, default=8080)
     p.add_argument("--host", default="0.0.0.0")
     p.add_argument("--backup-dir")
+    _add_input_args(p)
     p.set_defaults(func=cmd_serve)
 
     return parser
@@ -1552,6 +2269,8 @@ def serve(args) -> int:
         print("open http://%s:%d/" % (where, args.port))
         if getattr(args, "fake_device", None):
             print("(fake device: %s)" % args.fake_device)
+        if getattr(args, "fake_input", None):
+            print("(fake input: %s)" % args.fake_input)
         print("ctrl-c to stop")
         try:
             httpd.serve_forever()
@@ -1573,9 +2292,76 @@ def _lan_address() -> str:
         sock.close()
 
 
+SSE_HEARTBEAT = 10.0  # seconds between keepalives on an idle stream
+
+
+class MonitorHolder:
+    """One input monitor, shared by however many browsers are watching.
+
+    Reference counted, so the last tab to close is what releases an exclusive
+    grab. A stream that dies with the tab is only noticed on the next
+    heartbeat write, so that release can lag by up to SSE_HEARTBEAT.
+    """
+
+    def __init__(self, args):
+        self.args = args
+        self.lock = threading.Lock()
+        self.monitor = None
+        self.options = None
+        self.users = 0
+
+    def acquire(self, grab, all_devices):
+        wanted = (bool(grab), bool(all_devices))
+        with self.lock:
+            if self.monitor is not None and self.options != wanted:
+                if self.users:
+                    raise DeviceError(
+                        "another browser is already watching with different "
+                        "options. Stop watching there first, or match its "
+                        "settings."
+                    )
+                self._stop()
+            if self.monitor is None:
+                options = argparse.Namespace(**vars(self.args))
+                options.grab, options.all_devices = wanted
+                monitor = open_monitor(options, profile=self._profile())
+                monitor.start()
+                self.monitor, self.options = monitor, wanted
+            self.users += 1
+            return self.monitor
+
+    def release(self):
+        with self.lock:
+            self.users = max(0, self.users - 1)
+            if not self.users:
+                self._stop()
+
+    def refresh(self, profile):
+        """Point the monitor at a config that has just been written."""
+        with self.lock:
+            if self.monitor is not None:
+                self.monitor.profile = profile
+
+    def _profile(self):
+        try:
+            with open_board(self.args) as board:
+                return decode_config(board.read_config())
+        except (DeviceError, ProtocolError):
+            # Worth watching anyway: raw codes still say *something* arrived,
+            # which separates "wrong pin" from "nothing is getting through".
+            return None
+
+    def _stop(self):
+        monitor, self.monitor, self.options = self.monitor, None, None
+        if monitor is not None:
+            monitor.close()
+
+
 def _make_handler(args):
     import http.server
     import urllib.parse
+
+    monitors = MonitorHolder(args)
 
     class Handler(http.server.BaseHTTPRequestHandler):
         server_version = "ipacconf/" + __version__
@@ -1634,6 +2420,97 @@ def _make_handler(args):
             self.send_header("Content-Length", str(len(body)))
             self.end_headers()
             self.wfile.write(body)
+
+        # -- live input
+
+        def _flag(self, params, name):
+            value = (params.get(name) or ["0"])[0]
+            return value.lower() not in ("0", "", "false", "no")
+
+        def _sse(self, payload, name=None):
+            self.wfile.write(sse_frame(payload, name))
+            self.wfile.flush()
+
+        def _input_devices(self):
+            """What could be watched, and what already is.
+
+            Called before opening a stream: EventSource cannot read an error
+            response body, so anything that would refuse the stream has to be
+            findable up front.
+            """
+            fake = getattr(args, "fake_input", None)
+            devices = (
+                [_fake_device(fake)] if fake else find_input_devices(all_devices=True)
+            )
+            note = None
+            if sys.platform != "linux" and not fake:
+                note = ("watching the panel needs Linux (/dev/input). Restart "
+                        "with --fake-input to try this out here.")
+            elif not any(d.vendor == VENDOR_2015 for d in devices):
+                note = ("no /dev/input node belongs to the board. If `list` "
+                        "finds it, the kernel may not have bound a keyboard "
+                        "driver to it.")
+            return {
+                "devices": [
+                    dict(d.as_dict(),
+                         ours=d.vendor == VENDOR_2015 and d.product in IPAC2_MODES)
+                    for d in devices
+                ],
+                "fake": bool(fake),
+                "note": note,
+                "running": monitors.monitor is not None,
+                "watchers": monitors.users,
+                "options": (
+                    {"grab": monitors.options[0], "all": monitors.options[1]}
+                    if monitors.options else None
+                ),
+            }
+
+        def _input_stream(self):
+            """A long-lived text/event-stream of presses.
+
+            The options ride in the query string because EventSource can only
+            GET - which also makes an exclusive grab last exactly as long as
+            the connection that asked for it.
+            """
+            params = urllib.parse.parse_qs(urllib.parse.urlsplit(self.path).query)
+            grab, every = self._flag(params, "grab"), self._flag(params, "all")
+            try:
+                monitor = monitors.acquire(grab, every)
+            except (DeviceError, ProtocolError) as exc:
+                return self._json({"error": str(exc)}, 503)
+
+            events = monitor.stream.subscribe()
+            try:
+                self.send_response(200)
+                self.send_header("Content-Type", "text/event-stream")
+                self.send_header("Cache-Control", "no-store")
+                self.send_header("Connection", "close")
+                self.end_headers()
+                self._sse(
+                    {
+                        "devices": [d.as_dict() for d in monitor.devices],
+                        "grab": grab,
+                        "all": every,
+                        "matching": monitor.profile is not None,
+                        "fake": bool(getattr(args, "fake_input", None)),
+                    },
+                    "watching",
+                )
+                while True:
+                    try:
+                        self._sse(events.get(timeout=SSE_HEARTBEAT))
+                    except queue.Empty:
+                        if monitor.error:
+                            return self._sse({"error": monitor.error}, "fault")
+                        # Also how a closed tab is noticed: this write fails.
+                        self.wfile.write(b": ping\n\n")
+                        self.wfile.flush()
+            except (BrokenPipeError, ConnectionResetError, OSError):
+                pass
+            finally:
+                monitor.stream.unsubscribe(events)
+                monitors.release()
 
         def _changes_result(self, board, current, updated, profile):
             """The response shape shared by apply and restore."""
@@ -1697,6 +2574,20 @@ def _make_handler(args):
                 if path == "/api/config":
                     with open_board(args) as board:
                         return self._json(decode_config(board.read_config()))
+                if path == "/api/input/devices":
+                    return self._json(self._input_devices())
+                if path == "/api/input/stream":
+                    return self._input_stream()
+                if path == "/api/input":
+                    params = urllib.parse.parse_qs(
+                        urllib.parse.urlsplit(self.path).query)
+                    since = int((params.get("since") or ["0"])[0])
+                    monitor = monitors.monitor
+                    if monitor is None:
+                        return self._json({"running": False, "events": []})
+                    return self._json(
+                        {"running": True, "events": monitor.stream.since(since)}
+                    )
                 self._json({"error": "not found"}, 404)
             except (DeviceError, ProtocolError) as exc:
                 self._json({"error": str(exc)}, 500)
@@ -1762,6 +2653,9 @@ def _make_handler(args):
                     result["backup"] = self._backup(current)
                     board.write_config(updated)
                     result["written"] = True
+                    # Anyone watching the panel should be matched against what
+                    # the board holds now, not what it held when they started.
+                    monitors.refresh(decode_config(updated))
                 return self._json(result)
 
         def _incoming(self, payload):
@@ -1804,6 +2698,7 @@ def _make_handler(args):
                     result["backup"] = self._backup(current)
                     board.write_config(updated)
                     result["written"] = True
+                    monitors.refresh(decode_config(updated))
                 return self._json(result)
 
         def _backup(self, current):
@@ -1824,13 +2719,13 @@ PAGE = """<!doctype html>
   :root {
     --bg: #f6f7f9; --panel: #fff; --ink: #16181d; --muted: #626b7a;
     --line: #d8dde5; --accent: #2f6df6; --warn: #8a5a00; --warn-bg: #fff5e0;
-    --err: #a11; --ok: #17692f;
+    --err: #a11; --ok: #17692f; --live: #b3005c; --live-bg: #ffe8f1;
   }
   @media (prefers-color-scheme: dark) {
     :root {
       --bg: #14161a; --panel: #1c1f25; --ink: #e8eaee; --muted: #96a0b0;
       --line: #2c313a; --accent: #6f9bff; --warn: #f0c168; --warn-bg: #2e2513;
-      --err: #ff8a8a; --ok: #7fd396;
+      --err: #ff8a8a; --ok: #7fd396; --live: #ff85b8; --live-bg: #3a1327;
     }
   }
   * { box-sizing: border-box; }
@@ -1879,6 +2774,17 @@ PAGE = """<!doctype html>
   .name { font-weight: 600; }
   .when { font-size: .82rem; color: var(--muted); white-space: nowrap; }
   .changed { outline: 2px solid var(--accent); outline-offset: 1px; }
+  .live { outline: 2px solid var(--live); outline-offset: 1px; }
+  tr.live > td { background: var(--live-bg); }
+  tr.live > td.pin { color: var(--live); font-weight: 700; }
+  tr.fading > td { transition: background .5s ease-out; }
+  #inputLog { max-height: 13rem; overflow-y: auto; margin: .6rem 0 0; }
+  #inputLog div { font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+                  font-size: .82rem; padding: .1rem 0;
+                  border-bottom: 1px solid var(--line); white-space: pre; }
+  #inputLog div.miss { color: var(--muted); }
+  #inputLog div:first-child { color: var(--live); }
+  label.check { display: inline-flex; align-items: center; gap: .3rem; }
   ul.notes { margin: .4rem 0 0; padding-left: 1.1rem; }
   ul.notes li { margin: .15rem 0; }
   input[type=file] { font: inherit; max-width: 100%; }
@@ -1937,6 +2843,23 @@ PAGE = """<!doctype html>
       <input type="file" id="upload" accept="application/json,.json">
     </div>
     <div id="uploadRow"></div>
+  </div>
+
+  <div class="card">
+    <h2 style="margin-top:0">Live input</h2>
+    <p class="muted">Press a control on the cabinet and the pin it came from
+    lights up in the table below. Use it to find an action sitting on the wrong
+    pin: if pressing P1 button 1 lights up <span class="pin">1sw3</span>, that
+    is where the button is wired.</p>
+    <div class="row">
+      <button id="watch" class="primary">Start watching</button>
+      <label class="check muted"><input type="checkbox" id="grab">
+        exclusive - stop presses reaching Batocera</label>
+      <label class="check muted"><input type="checkbox" id="allDevices">
+        watch every input device</label>
+    </div>
+    <div id="inputStatus"></div>
+    <div id="inputLog"></div>
   </div>
 
   <div class="card" id="pins"><span class="muted">loading...</span></div>
@@ -2006,6 +2929,7 @@ function renderPins(changed) {
     html += '</table>';
   }
   $('#pins').innerHTML = html;
+  repaintLive();  // a re-render must not drop what is being held down
 }
 
 function collect() {
@@ -2074,6 +2998,181 @@ async function send(dry) {
   } catch (err) {
     say(esc(err.message), 'err');
   }
+}
+
+// -- live input
+//
+// The board is a keyboard, so a press raises an input event on the cabinet.
+// The server reads /dev/input, names the board action behind the event and
+// resolves it to pins against the config it last read; all that is left here
+// is lighting up the right cell. A tap is far too short to see, so a
+// highlight is held for a minimum time regardless of when the release lands.
+
+let WATCH = null;
+const HELD = new Map();
+const LIVE_MIN_MS = 450;
+const LIVE_MAX_MS = 6000;  // a release we never saw must not light a row forever
+
+function paintLive(pin, field, on) {
+  const cell = document.querySelector(
+    `#pins [data-pin="${pin}"][data-field="${field}"]`);
+  if (!cell) return;
+  cell.classList.toggle('live', on);
+  const row = cell.closest('tr');
+  if (row) row.classList.toggle('live', on || !!row.querySelector('.live'));
+}
+
+function repaintLive() {
+  for (const held of HELD.values()) paintLive(held.pin, held.field, true);
+}
+
+function holdPin(p) {
+  const key = `${p.pin}.${p.field}`;
+  const existing = HELD.get(key);
+  if (existing) clearTimeout(existing.timer);
+  HELD.set(key, {
+    pin: p.pin, field: p.field, since: Date.now(),
+    timer: setTimeout(() => releasePin(p, true), LIVE_MAX_MS),
+  });
+  paintLive(p.pin, p.field, true);
+}
+
+function releasePin(p, now) {
+  const key = `${p.pin}.${p.field}`;
+  const held = HELD.get(key);
+  if (!held) return;
+  clearTimeout(held.timer);
+  const left = now ? 0 : Math.max(0, LIVE_MIN_MS - (Date.now() - held.since));
+  if (left) {
+    held.timer = setTimeout(() => releasePin(p, true), left);
+    return;
+  }
+  HELD.delete(key);
+  paintLive(p.pin, p.field, false);
+}
+
+function clearLive() {
+  for (const held of HELD.values()) {
+    clearTimeout(held.timer);
+    paintLive(held.pin, held.field, false);
+  }
+  HELD.clear();
+}
+
+function describePins(e) {
+  if (e.pins && e.pins.length) {
+    const names = e.pins.map(
+      p => p.field === 'action' ? p.pin : `${p.pin} (shifted)`).join(', ');
+    return [names + (e.pins.length > 1 ? '  <- shared by several pins' : ''), false];
+  }
+  if (e.name) return ['no pin carries this code', true];
+  return ['not an action the board can store', true];
+}
+
+function logInput(e) {
+  const [where, missed] = describePins(e);
+  const hex = e.code === null || e.code === undefined
+    ? '' : ` (0x${e.code.toString(16).padStart(2, '0')})`;
+  const what = (e.name || `${e.kind} ${e.raw}`) + hex;
+  const line = document.createElement('div');
+  if (missed) line.className = 'miss';
+  line.textContent = [
+    new Date(e.ts * 1000).toLocaleTimeString(),
+    e.held ? 'down' : 'up  ',
+    what.padEnd(20),
+    where.padEnd(30),
+    e.node,
+  ].join('  ');
+  const log = $('#inputLog');
+  log.insertBefore(line, log.firstChild);
+  while (log.children.length > 40) log.removeChild(log.lastChild);
+}
+
+function onInput(e) {
+  logInput(e);
+  for (const pin of e.pins || []) {
+    if (e.held) holdPin(pin); else releasePin(pin, false);
+  }
+}
+
+function watchingText(info) {
+  const bits = [];
+  if (info.fake) bits.push('<strong>scripted input</strong> - no real hardware');
+  const names = (info.devices || []).map(d => esc(
+    d.node + (d.player ? ` (player ${d.player})` : ''))).join(', ');
+  bits.push(names ? `watching ${names}` : 'watching nothing');
+  if (info.grab) bits.push('<strong>presses are not reaching Batocera</strong>');
+  if (info.matching === false) {
+    bits.push('the board\\'s config could not be read, so presses cannot be '
+              + 'matched to pins - codes only');
+  }
+  return bits.join(' &middot; ');
+}
+
+function inputSay(html, cls) { banner('#inputStatus', html, cls); }
+
+async function preflight() {
+  const info = await api('/api/input/devices');
+  if (!info.fake && !info.devices.some(d => d.ours) && !$('#allDevices').checked) {
+    throw new Error(info.note || 'no input device belongs to the board. '
+      + 'If it is plugged in and `list` finds it, try "watch every input '
+      + 'device" to see what the panel is actually talking to.');
+  }
+  const wanted = { grab: $('#grab').checked, all: $('#allDevices').checked };
+  if (info.running && info.options
+      && (info.options.grab !== wanted.grab || info.options.all !== wanted.all)) {
+    throw new Error('another browser is already watching with different '
+      + `options (exclusive ${info.options.grab ? 'on' : 'off'}, `
+      + `all devices ${info.options.all ? 'on' : 'off'}). Match those, or stop `
+      + 'watching there first.');
+  }
+  return info;
+}
+
+async function startWatching() {
+  inputSay('starting...');
+  try {
+    await preflight();
+  } catch (err) {
+    return inputSay(esc(err.message), 'err');
+  }
+  const params = new URLSearchParams();
+  if ($('#grab').checked) params.set('grab', '1');
+  if ($('#allDevices').checked) params.set('all', '1');
+
+  let opened = false;
+  const source = new EventSource('/api/input/stream?' + params);
+  WATCH = source;
+  source.addEventListener('watching', (msg) => {
+    opened = true;
+    inputSay(watchingText(JSON.parse(msg.data)), 'ok');
+  });
+  source.addEventListener('fault', (msg) => {
+    inputSay(esc(JSON.parse(msg.data).error), 'err');
+    stopWatching();
+  });
+  source.onmessage = (msg) => onInput(JSON.parse(msg.data));
+  source.onerror = () => {
+    // EventSource retries by itself unless the response was never usable,
+    // which is how a refused stream arrives here.
+    if (source.readyState === EventSource.CLOSED || !opened) {
+      inputSay('the server refused the stream - check its log', 'err');
+      stopWatching();
+    } else {
+      inputSay('connection lost, reconnecting...', 'warn');
+    }
+  };
+  $('#watch').textContent = 'Stop watching';
+}
+
+function stopWatching() {
+  if (WATCH) { WATCH.close(); WATCH = null; }
+  clearLive();
+  $('#watch').textContent = 'Start watching';
+}
+
+function toggleWatching() {
+  if (WATCH) { stopWatching(); inputSay(''); } else { startWatching(); }
 }
 
 // -- saved configurations
@@ -2255,6 +3354,14 @@ $('#download').onclick = () => {
   a.download = 'ipac2-profile.json';
   a.click();
 };
+
+$('#watch').onclick = toggleWatching;
+for (const id of ['#grab', '#allDevices']) {
+  // Both options are properties of the connection, so changing one while
+  // watching means opening a new stream.
+  $(id).onchange = () => { if (WATCH) { stopWatching(); startWatching(); } };
+}
+window.addEventListener('beforeunload', stopWatching);
 
 (async () => {
   CODES = await api('/api/codes');

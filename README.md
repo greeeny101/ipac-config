@@ -24,6 +24,7 @@ python3 ipacconf.py apply p.json --dry-run    # annotated byte diff, writes noth
 python3 ipacconf.py apply p.json              # write it (backs up first)
 python3 ipacconf.py restore before.json       # byte-exact restore (backs up first)
 python3 ipacconf.py saved                     # list backups and shipped presets
+python3 ipacconf.py monitor                   # name the pin behind each button press
 python3 ipacconf.py serve                     # web UI on :8080
 ```
 
@@ -45,6 +46,66 @@ cabinet itself stays on the game. *Preview changes* runs the same diff as
 Add `--fake-device fixtures/dev-board.json` to any command to work against a
 saved config file instead of hardware — how the UI gets developed on a machine
 with no board attached.
+
+### Which button is on which pin
+
+Reading the config tells you what each pin is *supposed* to send. It cannot
+tell you which physical button is wired to which pin — and that is exactly
+what has gone wrong when an action turns up on the wrong control.
+
+`monitor`, and the **Live input** card in the web UI, close that loop: press a
+control on the cabinet and it names the pin the press came from.
+
+```sh
+python3 ipacconf.py monitor
+```
+```
+watching /dev/input/event7  Ultimarc Ultimarc IPAC 2
+press a control on the panel; ctrl-c to stop
+
+12:04:31  down  CTRL L (0x70)   1sw1                       event7
+12:04:31  up    CTRL L (0x70)   1sw1                       event7
+12:04:34  down  5 (0x22)        1sw1 (shifted), 1coin      event7
+```
+
+If pressing P1 button 1 names `1sw3`, that is where the button is wired, and
+the action you wanted on it is sitting on the wrong pin. In the web UI the
+same press lights up the row instead.
+
+Both directions of the question have the same answer. The arcade buttons *are*
+the controller: in keyboard mode a press emits a keycode, in Dinput mode a
+gamepad button, and either way the board raises a Linux input event that gets
+reverse-mapped through the config. So pressing a control while EmulationStation
+is asking you to "press a button for A" names its pin just the same.
+
+Two options, both off by default and both available as toggles in the UI:
+
+| | |
+|---|---|
+| `--grab` | Take exclusive control, so presses **stop reaching Batocera** while you test them. Without it, testing P1 buttons also navigates EmulationStation and can launch a game. The kernel releases the grab when the monitor stops. |
+| `--all-devices` | Watch every input device rather than just the board — worth a try when nothing shows up, since it proves whether the press is coming from some other controller entirely. |
+
+Reading `/dev/input/*` needs root, same as `/dev/hidraw*`.
+
+Lines are reported even when nothing matches. That is not a failure — it is the
+useful part. `no pin carries this code` means the board is sending something
+its stored config does not account for, which separates a mis-assigned pin from
+a config that was never written.
+
+Off the cabinet, `--fake-input` replays a script through the same translation
+and matching path:
+
+```sh
+python3 ipacconf.py serve --fake-device fixtures/ipac2-1.55-keyboard.json \
+                          --fake-input fixtures/input-keyboard-mode.jsonl
+```
+
+**One caveat, still to be settled against hardware.** In Dinput mode both
+players' buttons live in the same `GAMEPAD 1..32` code space, so the code alone
+cannot say who pressed. The event node it arrived on decides, on the assumption
+that the two gamepad interfaces come up in player order — which is unverified.
+Every line carries its raw evdev code, so if the board disagrees it is visible
+rather than silent.
 
 ### Saved configurations
 
@@ -225,13 +286,16 @@ real board ever disagrees.
 python3 -m unittest test_ipacconf.py
 ```
 
-121 tests, no hardware required. Three groups matter most:
+163 tests, no hardware required. Four groups matter most:
 `decode(encode(x)) == x` byte-for-byte, which is what makes read-modify-write
 trustworthy; `TestRealBoardDump`, which checks the pin table against a capture
 from an actual board — every pin decoding to its factory MAME default is
-strong evidence the indices are right; and `TestResolveSaved`, which is the
+strong evidence the indices are right; `TestResolveSaved`, which is the
 web UI's file-access boundary and refuses `..`, absolute paths, non-JSON names
-and symlinks pointing out of the directory.
+and symlinks pointing out of the directory; and `TestKeycodeTable`, which is
+what the input monitor stands on — it asserts no two keys reverse to the same
+action, since a collision there would name a pin that is not the one being
+pressed.
 
 ## Next
 
@@ -269,3 +333,11 @@ Five bugs the hardware found, all fixed:
 5. A write is **260 bytes, not 256** — four longer than a read response, so 65
    messages rather than 64. The board accepts a short write message by message
    and then discards it, committing nothing: no error, no change.
+
+The input monitor has **not** been run against the board yet. Everything it
+does off-hardware works — the keycode table round-trips, a scripted panel walk
+resolves each press to the right pin against a real board dump, and the web UI
+lights the matching row — but the two things only the cabinet can settle are
+whether the board's event node is found where `find_input_devices` looks for
+it, and the Dinput player question above. `monitor` on the cabinet is the
+one-command check for the first.

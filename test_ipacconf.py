@@ -6,6 +6,7 @@
 
 import json
 import os
+import struct
 import tempfile
 import unittest
 
@@ -903,6 +904,302 @@ class TestImportNotes(unittest.TestCase):
 
     def test_no_board_means_no_firmware_note(self):
         self.assertEqual(ic.import_notes(fixture("before-1.44.json"), None), [])
+
+
+# --------------------------------------------------------------------------
+# Input monitor
+# --------------------------------------------------------------------------
+
+
+class TestKeycodeTable(unittest.TestCase):
+    """Reversing a press depends entirely on this table being right."""
+
+    def test_the_kernel_table_is_intact(self):
+        self.assertEqual(len(ic.USB_KBD_KEYCODE), 256)
+        # Spot checks against linux/input-event-codes.h, at the boundaries
+        # that would move if a row were lost: KEY_A, KEY_ENTER, KEY_LEFTCTRL.
+        self.assertEqual(ic.USB_KBD_KEYCODE[0x04], 30)
+        self.assertEqual(ic.USB_KBD_KEYCODE[0x28], 28)
+        self.assertEqual(ic.USB_KBD_KEYCODE[0xE0], 29)
+
+    def test_keys_reverse_to_the_right_action(self):
+        for keycode, name in [
+            (30, "A"), (2, "1"), (6, "5"), (28, "ENTER"), (1, "ESC"),
+            (57, "SPACE"), (105, "LEFT"), (106, "RIGHT"), (103, "UP"),
+            (108, "DOWN"), (67, "F9"), (88, "F12"),
+        ]:
+            self.assertEqual(ic.code_to_name(ic.LINUX_TO_BOARD[keycode]), name)
+
+    def test_modifiers_use_ultimarcs_numbering_not_hids(self):
+        """The board stores CTRL L as 0x70; HID would call that F21."""
+        self.assertEqual(ic.LINUX_TO_BOARD[29], ic.KEY_CODES["CTRL L"])
+        self.assertEqual(ic.LINUX_TO_BOARD[126], ic.KEY_CODES["WIN MENU"])
+        self.assertNotIn(191, ic.LINUX_TO_BOARD)  # KEY_F21 must not claim 0x70
+
+    def test_media_keys_use_the_boards_own_codes(self):
+        self.assertEqual(ic.LINUX_TO_BOARD[116], ic.SYSTEM_CODES["POWER"])
+        self.assertEqual(ic.LINUX_TO_BOARD[113], ic.SYSTEM_CODES["MUTE"])
+        self.assertNotIn(93, ic.LINUX_TO_BOARD)  # KEY_KATAKANA is not POWER
+
+    def test_no_two_keys_reverse_to_the_same_action(self):
+        """A collision would name a pin that is not the one being pressed."""
+        seen = {}
+        for keycode, value in ic.LINUX_TO_BOARD.items():
+            self.assertNotIn(
+                value, seen,
+                "keycodes %s and %s both give %s"
+                % (seen.get(value), keycode, ic.code_to_name(value)),
+            )
+            seen[value] = keycode
+
+    def test_every_answer_is_something_the_board_can_store(self):
+        for value in ic.LINUX_TO_BOARD.values():
+            self.assertIn(value, ic.CODE_NAMES)
+
+    def test_the_inverse_round_trips(self):
+        for keycode, value in ic.LINUX_TO_BOARD.items():
+            self.assertEqual(ic.BOARD_TO_LINUX[value], keycode)
+
+
+class TestEventParsing(unittest.TestCase):
+    def event(self, etype, code, value):
+        return struct.pack(ic.INPUT_EVENT_FORMAT, 1700000000, 500, etype, code, value)
+
+    def test_a_batch_splits_into_records(self):
+        blob = self.event(ic.EV_KEY, 30, 1) + self.event(ic.EV_SYN, 0, 0)
+        self.assertEqual(
+            ic.parse_input_events(blob),
+            [(1700000000, 500, ic.EV_KEY, 30, 1), (1700000000, 500, 0, 0, 0)],
+        )
+
+    def test_a_partial_trailing_record_is_dropped(self):
+        blob = self.event(ic.EV_KEY, 30, 1) + b"\x00" * 7
+        self.assertEqual(len(ic.parse_input_events(blob)), 1)
+
+    def test_nothing_read_is_no_events(self):
+        self.assertEqual(ic.parse_input_events(b""), [])
+
+
+class TestEventAction(unittest.TestCase):
+    def test_a_key_becomes_its_board_code(self):
+        self.assertEqual(ic.event_action(ic.EV_KEY, 30), ("key", ic.KEY_CODES["A"]))
+
+    def test_joystick_buttons_span_gamepad_1_to_32(self):
+        self.assertEqual(
+            ic.event_action(ic.EV_KEY, ic.BTN_JOYSTICK),
+            ("gamepad", ic.GAME_CODES["GAMEPAD 1"]),
+        )
+        self.assertEqual(
+            ic.event_action(ic.EV_KEY, ic.BTN_LAST - 1),
+            ("gamepad", ic.GAME_CODES["GAMEPAD 32"]),
+        )
+
+    def test_hat_axes_become_hat_codes(self):
+        self.assertEqual(
+            ic.event_action(ic.EV_ABS, ic.ABS_HAT0X),
+            ("hat", ic.GAME_CODES["HAT 0"]),
+        )
+
+    def test_mouse_buttons_keep_their_order(self):
+        self.assertEqual(
+            ic.event_action(ic.EV_KEY, ic.BTN_MOUSE), ("mouse", ic.MOUSE_CODES["MOUSE L"])
+        )
+        self.assertEqual(
+            ic.event_action(ic.EV_KEY, ic.BTN_MOUSE + 1),
+            ("mouse", ic.MOUSE_CODES["MOUSE R"]),
+        )
+
+    def test_an_unstorable_event_has_no_code(self):
+        kind, code = ic.event_action(ic.EV_KEY, 0x100)  # BTN_0
+        self.assertIsNone(code)
+
+
+class TestPinsForAction(unittest.TestCase):
+    PROFILE = {
+        "pins": [
+            {"name": "1sw1", "action": "CTRL L", "alternate_action": "5"},
+            {"name": "1coin", "action": "5", "alternate_action": ""},
+            {"name": "1start", "action": "1", "alternate_action": "1"},
+            {"name": "2sw1", "action": "GAMEPAD 1", "alternate_action": ""},
+            {"name": "1sw2", "action": "GAMEPAD 1", "alternate_action": ""},
+        ]
+    }
+
+    def test_a_plain_hit(self):
+        self.assertEqual(
+            ic.pins_for_action(self.PROFILE, "CTRL L"),
+            [{"pin": "1sw1", "field": "action"}],
+        )
+
+    def test_a_shifted_hit_names_the_alternate(self):
+        hits = ic.pins_for_action(self.PROFILE, "5")
+        self.assertIn({"pin": "1sw1", "field": "alternate_action"}, hits)
+        self.assertIn({"pin": "1coin", "field": "action"}, hits)
+
+    def test_a_pin_repeating_its_action_is_reported_once(self):
+        self.assertEqual(
+            ic.pins_for_action(self.PROFILE, "1"),
+            [{"pin": "1start", "field": "action"}],
+        )
+
+    def test_an_unmapped_code_matches_nothing(self):
+        self.assertEqual(ic.pins_for_action(self.PROFILE, None), [])
+        self.assertEqual(ic.pins_for_action(self.PROFILE, "F9"), [])
+
+    def test_no_profile_matches_nothing(self):
+        self.assertEqual(ic.pins_for_action(None, "CTRL L"), [])
+
+    def test_the_event_node_breaks_a_dinput_tie(self):
+        """Both players share GAMEPAD 1..32, so the pad it arrived on decides."""
+        both = ic.pins_for_action(self.PROFILE, "GAMEPAD 1")
+        self.assertEqual(len(both), 2)
+        self.assertEqual(
+            ic.pins_for_action(self.PROFILE, "GAMEPAD 1", player=2),
+            [{"pin": "2sw1", "field": "action"}],
+        )
+
+    def test_an_unknown_player_falls_back_to_every_candidate(self):
+        self.assertEqual(
+            len(ic.pins_for_action(self.PROFILE, "GAMEPAD 1", player=9)), 2
+        )
+
+
+class TestEventStream(unittest.TestCase):
+    def setUp(self):
+        self.stream = ic.EventStream(size=3)
+
+    def test_sequence_numbers_count_up(self):
+        first = self.stream.publish({"name": "A"})
+        second = self.stream.publish({"name": "B"})
+        self.assertEqual((first["seq"], second["seq"]), (1, 2))
+        self.assertEqual(self.stream.latest, 2)
+
+    def test_since_returns_only_what_came_after(self):
+        for name in "ABC":
+            self.stream.publish({"name": name})
+        self.assertEqual([e["name"] for e in self.stream.since(1)], ["B", "C"])
+        self.assertEqual(self.stream.since(3), [])
+
+    def test_the_buffer_is_bounded(self):
+        for name in "ABCDE":
+            self.stream.publish({"name": name})
+        self.assertEqual([e["name"] for e in self.stream.since(0)], ["C", "D", "E"])
+
+    def test_subscribers_get_events_as_they_land(self):
+        sub = self.stream.subscribe()
+        self.stream.publish({"name": "A"})
+        self.assertEqual(sub.get_nowait()["name"], "A")
+        self.stream.unsubscribe(sub)
+        self.stream.publish({"name": "B"})
+        self.assertTrue(sub.empty())
+
+    def test_a_stalled_subscriber_loses_events_rather_than_blocking(self):
+        self.stream.subscribe(maxsize=1)
+        for name in "ABC":
+            self.stream.publish({"name": name})  # must not hang
+        self.assertEqual(self.stream.latest, 3)
+
+
+class TestSseFrame(unittest.TestCase):
+    def test_a_plain_event(self):
+        self.assertEqual(ic.sse_frame({"a": 1}), b'data: {"a": 1}\n\n')
+
+    def test_a_named_event(self):
+        self.assertEqual(
+            ic.sse_frame({"a": 1}, "watching"),
+            b'event: watching\ndata: {"a": 1}\n\n',
+        )
+
+    def test_frames_end_blank_line_delimited(self):
+        """Two frames back to back must not run into one another."""
+        blob = ic.sse_frame({"a": 1}) + ic.sse_frame({"b": 2})
+        self.assertEqual(len(blob.split(b"\n\n")), 3)
+
+
+class TestFakeInputMonitor(unittest.TestCase):
+    """The replay path, which is what makes the UI developable off-cabinet."""
+
+    PROFILE = {"pins": [{"name": "1sw1", "action": "CTRL L",
+                         "alternate_action": ""}]}
+
+    def script(self, *lines):
+        handle = tempfile.NamedTemporaryFile(
+            "w", suffix=".jsonl", delete=False)
+        handle.write("\n".join(lines) + "\n")
+        handle.close()
+        self.addCleanup(os.remove, handle.name)
+        return handle.name
+
+    def drain(self, path, expected):
+        monitor = ic.FakeInputMonitor(path, profile=self.PROFILE, loop=False)
+        sub = monitor.stream.subscribe()
+        monitor.start()
+        try:
+            return [sub.get(timeout=2.0) for _ in range(expected)]
+        finally:
+            monitor.close()
+
+    def test_a_named_action_replays_as_the_real_keycode(self):
+        path = self.script('{"after": 0, "action": "CTRL L", "value": 1}')
+        (event,) = self.drain(path, 1)
+        self.assertEqual(event["name"], "CTRL L")
+        self.assertEqual(event["raw"], 29)  # KEY_LEFTCTRL, as the kernel sends
+        self.assertEqual(event["pins"], [{"pin": "1sw1", "field": "action"}])
+        self.assertTrue(event["held"])
+
+    def test_raw_evdev_numbers_work_too(self):
+        path = self.script('{"after": 0, "type": 1, "code": 29, "value": 0}')
+        (event,) = self.drain(path, 1)
+        self.assertEqual(event["name"], "CTRL L")
+        self.assertFalse(event["held"])
+
+    def test_comments_and_blank_lines_are_skipped(self):
+        path = self.script(
+            "# a comment", "", '{"after": 0, "action": "CTRL L", "value": 1}')
+        self.assertEqual(len(self.drain(path, 1)), 1)
+
+    def test_an_action_no_keyboard_can_send_is_refused(self):
+        path = self.script('{"after": 0, "action": "GAMEPAD 1", "value": 1}')
+        with self.assertRaises(ic.ProtocolError):
+            ic.FakeInputMonitor(path, loop=False)
+
+    def test_an_empty_script_is_refused(self):
+        with self.assertRaises(ic.ProtocolError):
+            ic.FakeInputMonitor(self.script("# nothing here"), loop=False)
+
+
+class TestTranslate(unittest.TestCase):
+    """The bits of translation that carry state between events."""
+
+    def setUp(self):
+        self.device = ic._fake_device("/dev/input/event9")
+        self.monitor = ic.BaseMonitor([self.device])
+
+    def translate(self, etype, code, value):
+        return self.monitor.translate(self.device, etype, code, value)
+
+    def test_syn_events_are_dropped(self):
+        self.assertIsNone(self.translate(ic.EV_SYN, 0, 0))
+
+    def test_autorepeat_is_dropped(self):
+        """Otherwise a held button floods the log with itself."""
+        self.assertIsNotNone(self.translate(ic.EV_KEY, 30, 1))
+        self.assertIsNone(self.translate(ic.EV_KEY, 30, 2))
+
+    def test_an_axis_reports_only_when_it_leaves_or_returns_to_rest(self):
+        # The first value seen is what counts as released, so a stick centred
+        # at 128 works the same as one centred at 0.
+        self.assertIsNone(self.translate(ic.EV_ABS, ic.ABS_HAT0X, 128))
+        moved = self.translate(ic.EV_ABS, ic.ABS_HAT0X, 255)
+        self.assertTrue(moved["held"])
+        self.assertIsNone(self.translate(ic.EV_ABS, ic.ABS_HAT0X, 255))
+        self.assertFalse(self.translate(ic.EV_ABS, ic.ABS_HAT0X, 128)["held"])
+
+    def test_a_keyboard_event_is_not_pinned_to_a_player(self):
+        """Player only disambiguates the shared GAMEPAD code space."""
+        self.assertIsNone(self.translate(ic.EV_KEY, 30, 1)["player"])
+        self.assertEqual(
+            self.translate(ic.EV_KEY, ic.BTN_JOYSTICK, 1)["player"], 1)
 
 
 if __name__ == "__main__":
