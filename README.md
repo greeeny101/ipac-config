@@ -41,7 +41,9 @@ capture of your board's factory settings.
 `serve` prints a LAN URL. Every pin appears as a dropdown over the full code
 table, so you can configure the cabinet from a laptop or phone while the
 cabinet itself stays on the game. *Preview changes* runs the same diff as
-`--dry-run`; *Write to board* backs up first.
+`--dry-run`; *Write to board* backs up first. *Reset all pins* blanks every
+action and writes that, which is how you take a panel apart to work out what
+is wired where — see [below](#which-button-is-on-which-pin).
 
 Add `--fake-device fixtures/dev-board.json` to any command to work against a
 saved config file instead of hardware — how the UI gets developed on a machine
@@ -92,6 +94,16 @@ useful part. `no pin carries this code` means the board is sending something
 its stored config does not account for, which separates a mis-assigned pin from
 a config that was never written.
 
+The exception is an event type there is no reading of at all — chiefly the
+`EV_MSC` scan code the kernel raises alongside *every* key event. One of those
+per press would bury the presses, so the first is reported and the rest are
+dropped with `hiding the rest of these`.
+
+In the web UI, keystrokes are swallowed for as long as the stream is open.
+The board is a keyboard, so with the page open on the cabinet its own presses
+would otherwise scroll it, fire whatever button has focus, and land on a
+focused pin dropdown and change what it says.
+
 Off the cabinet, `--fake-input` replays a script through the same translation
 and matching path:
 
@@ -106,6 +118,13 @@ cannot say who pressed. The event node it arrived on decides, on the assumption
 that the two gamepad interfaces come up in player order — which is unverified.
 Every line carries its raw evdev code, so if the board disagrees it is visible
 rather than silent.
+
+Until it is settled, the way to read a muddled panel is to stop guessing and
+isolate: the UI's *Reset all pins* button sets every action to none and writes
+that, after which you put one action back at a time. With only one pin able to
+produce anything, whatever arrives came from it. Shift-key flags are left
+alone, so the hold-to-switch-mode combos keep working, and the board is backed
+up first like any other write.
 
 ### Saved configurations
 

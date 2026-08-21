@@ -330,13 +330,17 @@ def decode_config(buf: bytes) -> dict:
     for name in PIN_ORDER:
         ai, alt_i, shift_i = PIN_TABLE[name]
         action = data[ai]
-        if not action:
-            continue
+        shift = bool(data[shift_i] & SHIFT_BIT)
+        if not action and not shift:
+            continue  # nothing programmed here
+        # A pin can be the shift key while sending nothing itself, and that is
+        # worth reporting: it is a real setting, and a form that did not show
+        # it would clear it on the next write.
         pin = {"name": name, "action": _action_name(action, macro_names)}
         alt = data[alt_i]
         if alt:
             pin["alternate_action"] = _action_name(alt, macro_names)
-        if data[shift_i] & SHIFT_BIT:
+        if shift:
             pin["shift"] = True
         pins.append(pin)
 
@@ -1302,6 +1306,7 @@ class BaseMonitor:
         self.error = None
         self._rest = {}  # (node, axis) -> the value that counts as "not held"
         self._held = {}  # (node, axis) -> whether it is away from rest
+        self._muted = set()  # (node, type) already reported as unreadable
         self._thread = None
         self._stop = threading.Event()
 
@@ -1346,6 +1351,21 @@ class BaseMonitor:
 
         kind, board_code = event_action(etype, code)
 
+        muted = False
+        if kind == "other":
+            # An event type we have no reading of - in practice the EV_MSC scan
+            # code the kernel raises alongside every single key event, so
+            # reporting each one doubles the log and buries the presses. Say so
+            # once per node and type, then drop the rest. This lives on the
+            # monitor, so it is once per watching session rather than per
+            # subscriber: a browser joining a stream already running sees no
+            # such line.
+            key = (device.node, etype)
+            if key in self._muted:
+                return None
+            self._muted.add(key)
+            muted = True
+
         if etype == EV_ABS:
             # Axes have no press/release; the value they sit at when nothing is
             # touched counts as released. Taking the first value seen as that
@@ -1374,6 +1394,7 @@ class BaseMonitor:
             "held": held,
             "name": name,
             "code": board_code,
+            "muted": muted,
             "pins": pins_for_action(self.profile, name, player),
         }
 
@@ -2099,8 +2120,10 @@ def monitor_line(event: dict) -> str:
             where += "  <- several pins carry this code"
     elif event["name"]:
         where = "-- no pin carries this code"
+    elif event.get("muted"):
+        where = "-- not an action the board can store; hiding the rest of these"
     else:
-        where = "-- not an action the board can be programmed with"
+        where = "-- not an action the board can store"
     return "%s  %-4s %-22s %-30s %s" % (
         when, "down" if event["held"] else "up", what, where, event["node"]
     )
@@ -2805,6 +2828,7 @@ PAGE = """<!doctype html>
       <button id="preview">Preview changes</button>
       <button id="write" class="primary">Write to board</button>
       <button id="download">Download JSON</button>
+      <button id="clear">Reset all pins</button>
     </div>
     <div id="status"></div>
   </div>
@@ -3066,6 +3090,7 @@ function describePins(e) {
     return [names + (e.pins.length > 1 ? '  <- shared by several pins' : ''), false];
   }
   if (e.name) return ['no pin carries this code', true];
+  if (e.muted) return ['not an action the board can store; hiding the rest of these', true];
   return ['not an action the board can store', true];
 }
 
@@ -3111,6 +3136,26 @@ function watchingText(info) {
 
 function inputSay(html, cls) { banner('#inputStatus', html, cls); }
 
+// The board is a keyboard, so with this page open on the cabinet its presses
+// also arrive here as ordinary keystrokes: arrows and space scroll the page,
+// space and Enter fire whatever button has focus, and arrows land on a focused
+// pin dropdown and silently change what it says. The evdev grab only covers
+// the nodes the monitor matched, so it is not an answer on its own. Swallow
+// the lot for as long as the stream is open - there is nothing on this page to
+// type into - but leave ctrl/cmd/alt combos alone so reload and close still
+// work.
+function swallowKeys(ev) {
+  if (ev.ctrlKey || ev.metaKey || ev.altKey) return;
+  ev.preventDefault();
+}
+
+function watchKeys(on) {
+  for (const type of ['keydown', 'keypress']) {
+    if (on) window.addEventListener(type, swallowKeys, true);
+    else window.removeEventListener(type, swallowKeys, true);
+  }
+}
+
 async function preflight() {
   const info = await api('/api/input/devices');
   if (!info.fake && !info.devices.some(d => d.ours) && !$('#allDevices').checked) {
@@ -3151,6 +3196,8 @@ async function startWatching() {
     inputSay(esc(JSON.parse(msg.data).error), 'err');
     stopWatching();
   });
+  watchKeys(true);
+  if (document.activeElement) document.activeElement.blur();
   source.onmessage = (msg) => onInput(JSON.parse(msg.data));
   source.onerror = () => {
     // EventSource retries by itself unless the response was never usable,
@@ -3167,6 +3214,7 @@ async function startWatching() {
 
 function stopWatching() {
   if (WATCH) { WATCH.close(); WATCH = null; }
+  watchKeys(false);
   clearLive();
   $('#watch').textContent = 'Start watching';
 }
@@ -3346,6 +3394,19 @@ $('#read').onclick = () => { say(''); loadConfig(); };
 $('#preview').onclick = () => send(true);
 $('#write').onclick = () => {
   if (confirm('Write this configuration to the board?')) send(false);
+};
+$('#clear').onclick = () => {
+  // A blank board is how you tell two pins carrying the same code apart: clear
+  // everything, put one action back, and whatever arrives came from that pin.
+  // The shift-key checkboxes are left alone on purpose - clearing Start1's
+  // would take the hold-to-switch-mode combos with it.
+  const fields = document.querySelectorAll('#pins select[data-pin]');
+  if (!fields.length) return say('the pin table has not loaded yet.', 'err');
+  if (!confirm('Set every pin to none and write that to the board?\\n\\n'
+      + 'The panel will do nothing until you fill pins back in. Shift-key '
+      + 'flags are kept, and the board is backed up first.')) return;
+  for (const el of fields) el.value = '';
+  send(false);
 };
 $('#download').onclick = () => {
   const blob = new Blob([JSON.stringify(collect(), null, 2)], {type: 'application/json'});

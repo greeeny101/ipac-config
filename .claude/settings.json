@@ -1,0 +1,14 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(python3 -m unittest test_ipacconf.py)",
+      "Bash(timeout 14 python3 ipacconf.py monitor --fake-device fixtures/ipac2-1.55-keyboard.json --fake-input fixtures/input-keyboard-mode.jsonl)",
+      "Bash(curl -s localhost:8099/api/config)",
+      "Bash(curl -s localhost:8099/)",
+      "Bash(python3 -c ' *)",
+      "Bash(node --check /tmp/p.js)",
+      "Bash(pkill -f \"port 8099\")",
+      "Read(//Users/marcgreenwood/.ipac-backups/**)"
+    ]
+  }
+}
