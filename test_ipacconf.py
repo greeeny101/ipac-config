@@ -96,6 +96,24 @@ class TestEncodeDecode(unittest.TestCase):
         start = next(p for p in profile["pins"] if p["name"] == "1start")
         self.assertTrue(start.get("shift"))
 
+    def test_a_shift_key_that_sends_nothing_is_still_reported(self):
+        """Otherwise a form filled from this would clear the flag on write."""
+        base = bytearray(self.raw)
+        base[4 + ic.PIN_TABLE["1start"][0]] = 0  # shift key, no action of its own
+        profile = ic.decode_config(bytes(base))
+        start = next(p for p in profile["pins"] if p["name"] == "1start")
+        self.assertEqual(start["action"], ic.NONE)
+        self.assertTrue(start["shift"])
+        again = ic.encode_config(profile, bytes(base))
+        self.assertEqual(bytes(again), bytes(base))
+
+    def test_a_pin_with_neither_action_nor_shift_is_left_out(self):
+        base = bytearray(self.raw)
+        for index in ic.PIN_TABLE["1up"]:
+            base[4 + index] = 0
+        names = [p["name"] for p in ic.decode_config(bytes(base))["pins"]]
+        self.assertNotIn("1up", names)
+
     def test_alternate_action_survives(self):
         profile = ic.decode_config(self.raw)
         coin = next(p for p in profile["pins"] if p["name"] == "1coin")
@@ -1168,6 +1186,12 @@ class TestFakeInputMonitor(unittest.TestCase):
             ic.FakeInputMonitor(self.script("# nothing here"), loop=False)
 
 
+# Not in ipacconf: an event type it deliberately has no reading of, which is
+# the point of the tests below. From linux/input-event-codes.h.
+EV_MSC = 0x04
+MSC_SCAN = 0x04
+
+
 class TestTranslate(unittest.TestCase):
     """The bits of translation that carry state between events."""
 
@@ -1200,6 +1224,64 @@ class TestTranslate(unittest.TestCase):
         self.assertIsNone(self.translate(ic.EV_KEY, 30, 1)["player"])
         self.assertEqual(
             self.translate(ic.EV_KEY, ic.BTN_JOYSTICK, 1)["player"], 1)
+
+    def test_an_unreadable_event_type_is_reported_once_then_hidden(self):
+        """EV_MSC shadows every press, so reporting each one buries the log."""
+        first = self.translate(EV_MSC, MSC_SCAN, 458756)
+        self.assertEqual(first["kind"], "other")
+        self.assertTrue(first["muted"])
+        for value in (458757, 458758):
+            self.assertIsNone(self.translate(EV_MSC, MSC_SCAN, value))
+
+    def test_each_node_gets_its_own_first_report(self):
+        other = ic._fake_device("/dev/input/event8")
+        self.assertTrue(self.translate(EV_MSC, MSC_SCAN, 1)["muted"])
+        self.assertTrue(
+            self.monitor.translate(other, EV_MSC, MSC_SCAN, 1)["muted"])
+
+    def test_hiding_a_type_does_not_swallow_real_presses(self):
+        self.translate(EV_MSC, MSC_SCAN, 458756)
+        press = self.translate(ic.EV_KEY, 30, 1)
+        self.assertEqual(press["name"], "A")
+        self.assertFalse(press["muted"])
+
+
+class TestMonitorLine(unittest.TestCase):
+    """The CLI's rendering of one event."""
+
+    def line(self, **over):
+        event = {
+            "ts": 0, "node": "event9", "kind": "key", "raw": 30, "held": True,
+            "name": "A", "code": 0x04, "muted": False, "pins": [],
+        }
+        event.update(over)
+        return ic.monitor_line(event)
+
+    def test_a_press_names_its_pin(self):
+        line = self.line(pins=[{"pin": "1sw1", "field": "action"}])
+        self.assertIn("A (0x04)", line)
+        self.assertIn("1sw1", line)
+        self.assertIn("down", line)
+
+    def test_a_shifted_pin_says_so(self):
+        line = self.line(pins=[{"pin": "1sw1", "field": "alternate_action"}])
+        self.assertIn("1sw1 (shifted)", line)
+
+    def test_several_pins_are_flagged_as_ambiguous(self):
+        line = self.line(pins=[
+            {"pin": "1sw1", "field": "action"},
+            {"pin": "2sw1", "field": "action"},
+        ])
+        self.assertIn("several pins carry this code", line)
+
+    def test_a_code_no_pin_carries_says_so(self):
+        self.assertIn("no pin carries this code", self.line())
+
+    def test_a_hidden_type_explains_its_own_silence(self):
+        line = self.line(kind="other", raw=4, name=None, code=None, muted=True)
+        self.assertIn("hiding the rest", line)
+        self.assertNotIn("hiding the rest", self.line(
+            kind="other", raw=4, name=None, code=None))
 
 
 if __name__ == "__main__":

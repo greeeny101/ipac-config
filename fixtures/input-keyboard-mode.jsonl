@@ -1,0 +1,33 @@
+# A scripted panel walk, for developing the UI away from the cabinet.
+#   ipacconf.py serve --fake-device fixtures/ipac2-1.55-keyboard.json \
+#                     --fake-input fixtures/input-keyboard-mode.jsonl
+# "after" is seconds to wait before the event. Name a board action and it is
+# turned back into the keycode the kernel would have reported, so the whole
+# translation path runs; or give raw evdev "type"/"code" numbers instead.
+# The actions here are the factory MAME layout, so each one should light up
+# the pin named beside it.
+# The type 4 lines are EV_MSC scan codes: on a real keyboard node one shadows
+# every press. They are here so the "say it once, then hide them" path runs -
+# the script loops, so a single line across several passes is the proof.
+{"after": 1.0, "type": 4, "code": 4, "value": 458756}
+{"after": 0.0, "action": "UP", "value": 1}
+{"after": 0.25, "action": "UP", "value": 0}
+{"after": 0.6, "action": "LEFT", "value": 1}
+{"after": 0.25, "action": "LEFT", "value": 0}
+{"after": 0.6, "action": "CTRL L", "value": 1}
+{"after": 0.3, "action": "CTRL L", "value": 0}
+{"after": 0.6, "action": "ALT L", "value": 1}
+{"after": 0.3, "action": "ALT L", "value": 0}
+{"after": 0.6, "type": 4, "code": 4, "value": 458758}
+{"after": 0.0, "action": "1", "value": 1}
+{"after": 0.3, "action": "1", "value": 0}
+{"after": 0.6, "action": "5", "value": 1}
+{"after": 0.3, "action": "5", "value": 0}
+{"after": 0.8, "action": "R", "value": 1}
+{"after": 0.3, "action": "R", "value": 0}
+{"after": 0.8, "action": "F", "value": 1}
+{"after": 0.3, "action": "F", "value": 0}
+{"after": 1.0, "action": "F9", "value": 1}
+{"after": 0.3, "action": "F9", "value": 0}
+{"after": 1.5, "type": 1, "code": 88, "value": 1}
+{"after": 0.3, "type": 1, "code": 88, "value": 0}
