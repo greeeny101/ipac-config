@@ -22,7 +22,8 @@ python3 ipacconf.py list                      # what's attached, firmware, confi
 python3 ipacconf.py dump -o before.json       # read the board  ← do this first
 python3 ipacconf.py apply p.json --dry-run    # annotated byte diff, writes nothing
 python3 ipacconf.py apply p.json              # write it (backs up first)
-python3 ipacconf.py restore before.json       # byte-exact restore
+python3 ipacconf.py restore before.json       # byte-exact restore (backs up first)
+python3 ipacconf.py saved                     # list backups and shipped presets
 python3 ipacconf.py serve                     # web UI on :8080
 ```
 
@@ -44,6 +45,32 @@ cabinet itself stays on the game. *Preview changes* runs the same diff as
 Add `--fake-device fixtures/dev-board.json` to any command to work against a
 saved config file instead of hardware — how the UI gets developed on a machine
 with no board attached.
+
+### Saved configurations
+
+The UI's *Saved configurations* card lists two places: the backup directory,
+which fills up on its own because every write backs up first, and the
+`profiles/` shipped next to the script. A file from the browsing phone or
+laptop can be dropped in with the file picker.
+
+Each saved file offers two different things, and the distinction matters:
+
+- **Load into form** fills the dropdowns and highlights what it changed.
+  Nothing reaches the board until *Write to board*, so it can be reviewed and
+  edited first. Pins the file does not name keep what the board already has,
+  exactly as `apply` behaves.
+- **Restore exactly** writes all 256 bytes straight back — every pin, plus
+  macros and the bytes whose meaning nobody has documented. This is the one to
+  use when putting a board back the way it was, because a dump holds things the
+  pin form cannot show, and loading it into the form would quietly drop them.
+  Only offered for dumps, which are the files with a `raw` field.
+
+*Compare to board* is the same diff without writing. Backups can also be
+labelled — the name is stored inside the file, so a copy keeps it — downloaded
+to the device browsing, or deleted. Presets are read only. Restoring backs up
+what was on the board first, so a restore is itself undoable.
+
+`python3 ipacconf.py saved` prints the same listing over SSH.
 
 ## Profiles
 
@@ -76,8 +103,12 @@ left exactly as it was.
 - Every write is **read-modify-write** on the board's live config. Bytes whose
   meaning isn't documented — and there are some — are carried across untouched
   rather than guessed at.
-- `apply` backs up to `/userdata/system/ipac-backups/` (or `~/.ipac-backups`)
-  before writing.
+- `apply` and `restore` both back up to `/userdata/system/ipac-backups/` (or
+  `~/.ipac-backups`) before writing. `--no-backup` opts out.
+- The web UI only ever opens files inside those two directories. Ids from the
+  browser are checked against the real path before anything is read, deleted or
+  written — `serve` binds `0.0.0.0`, so the page is reachable by anything on
+  the LAN.
 - `--dry-run` shows every changing byte with its offset, meaning, and old/new
   values.
 - Pre-2015 boards (`d208:0310`) are detected and refused: different protocol,
@@ -194,11 +225,13 @@ real board ever disagrees.
 python3 -m unittest test_ipacconf.py
 ```
 
-82 tests, no hardware required. Two groups matter most:
+121 tests, no hardware required. Three groups matter most:
 `decode(encode(x)) == x` byte-for-byte, which is what makes read-modify-write
-trustworthy; and `TestRealBoardDump`, which checks the pin table against a
-capture from an actual board — every pin decoding to its factory MAME default
-is strong evidence the indices are right.
+trustworthy; `TestRealBoardDump`, which checks the pin table against a capture
+from an actual board — every pin decoding to its factory MAME default is
+strong evidence the indices are right; and `TestResolveSaved`, which is the
+web UI's file-access boundary and refuses `..`, absolute paths, non-JSON names
+and symlinks pointing out of the directory.
 
 ## Next
 
@@ -209,22 +242,6 @@ recording, so both directions can be diffed against each other. Look for a
 `SET_REPORT` whose header byte is neither `0x50` (write) nor `0x59` (read).
 Gate any Xinput switch behind a confirmation: the board cannot be reached over
 USB in that mode, so it is the one switch the tool cannot undo.
-
-**Importing saved configs in the web UI.** Two halves, and they are different
-operations:
-
-- *Load into the form* — file picker, parse, populate the dropdowns, review,
-  then write. Fine for hand-edited profiles.
-- *Restore exactly* — for dumps carrying a `raw` field, write those 256 bytes
-  byte-for-byte, as the CLI's `restore` does. Necessary because a dump can
-  hold macros and unnamed bytes the pin form cannot represent, and round
-  tripping through the form would silently drop them.
-
-Add a server-side backup browser too: `apply` writes to
-`/userdata/system/ipac-backups/` on the cabinet, so the backups live there
-rather than on the phone being used to browse. Listing them with timestamps
-and a one-click restore is likely more useful than uploading a file. Warn when
-a dump's firmware differs from the connected board's.
 
 ## Status
 

@@ -586,5 +586,324 @@ class TestProfilesOnDisk(unittest.TestCase):
         self.assertEqual(len(bytes.fromhex(profile["raw"])), ic.CONFIG_SIZE)
 
 
+# --------------------------------------------------------------------------
+# Importing saved configurations
+# --------------------------------------------------------------------------
+
+
+HERE = os.path.dirname(os.path.abspath(__file__))
+
+
+def fixture(name):
+    return ic.load_profile(os.path.join(HERE, "fixtures", name))
+
+
+class SavedDirsCase(unittest.TestCase):
+    """A throwaway backup directory plus the shipped presets."""
+
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp()
+        self.dirs = [
+            {"source": "backups", "path": self.tmp, "writable": True},
+            {"source": "presets", "path": ic.PRESET_DIR, "writable": False},
+        ]
+
+    def tearDown(self):
+        for name in os.listdir(self.tmp):
+            path = os.path.join(self.tmp, name)
+            if os.path.islink(path) or os.path.isfile(path):
+                os.unlink(path)
+        os.rmdir(self.tmp)
+
+    def save(self, name, profile, mtime=None):
+        path = os.path.join(self.tmp, name)
+        with open(path, "w") as fh:
+            json.dump(profile, fh)
+        if mtime is not None:
+            os.utime(path, (mtime, mtime))
+        return path
+
+
+class TestListSaved(SavedDirsCase):
+    def test_newest_first(self):
+        self.save("a.json", {"pins": []}, mtime=1000)
+        self.save("b.json", {"pins": []}, mtime=3000)
+        self.save("c.json", {"pins": []}, mtime=2000)
+        names = [e["name"] for e in ic.list_saved(self.dirs) if e["source"] == "backups"]
+        self.assertEqual(names, ["b.json", "c.json", "a.json"])
+
+    def test_a_dump_is_described_from_its_contents(self):
+        self.save("dump.json", fixture("ipac2-1.55-keyboard.json"))
+        entry = [e for e in ic.list_saved(self.dirs) if e["name"] == "dump.json"][0]
+        self.assertTrue(entry["has_raw"])
+        self.assertEqual(entry["firmware"], "0.55")
+        self.assertEqual(entry["pins"], 32)
+        self.assertTrue(entry["writable"])
+        self.assertEqual(entry["id"], "backups/dump.json")
+
+    def test_presets_are_listed_and_are_not_writable(self):
+        presets = [e for e in ic.list_saved(self.dirs) if e["source"] == "presets"]
+        self.assertTrue(presets, "the shipped profiles should be browsable")
+        self.assertTrue(all(not e["writable"] for e in presets))
+        self.assertTrue(all(not e["has_raw"] for e in presets))
+
+    def test_an_unreadable_file_does_not_break_the_listing(self):
+        with open(os.path.join(self.tmp, "broken.json"), "w") as fh:
+            fh.write("{ this is not json")
+        self.save("fine.json", {"pins": []})
+        entries = {e["name"]: e for e in ic.list_saved(self.dirs)}
+        self.assertIn("error", entries["broken.json"])
+        self.assertNotIn("error", entries["fine.json"])
+
+    def test_non_json_and_dotfiles_are_ignored(self):
+        for name in ("notes.txt", ".hidden.json"):
+            with open(os.path.join(self.tmp, name), "w") as fh:
+                fh.write("{}")
+        self.assertEqual(
+            [e for e in ic.list_saved(self.dirs) if e["source"] == "backups"], []
+        )
+
+    def test_the_limit_is_honoured(self):
+        for i in range(5):
+            self.save("f%d.json" % i, {"pins": []})
+        self.assertEqual(len(ic.list_saved(self.dirs, limit=3)), 3)
+
+
+class TestWriteBackup(SavedDirsCase):
+    def test_two_backups_in_one_second_do_not_collide(self):
+        """Restoring a backup takes a backup - same second, same name."""
+        first = ic.write_backup({"pins": [{"name": "1up", "action": "UP"}]}, self.tmp)
+        second = ic.write_backup({"pins": [{"name": "1up", "action": "W"}]}, self.tmp)
+        self.assertNotEqual(first, second)
+        self.assertEqual(ic.load_profile(first)["pins"][0]["action"], "UP")
+        self.assertEqual(ic.load_profile(second)["pins"][0]["action"], "W")
+
+
+class TestFakeBoardHeader(unittest.TestCase):
+    """The fake board has to answer reads the way a real one does."""
+
+    def setUp(self):
+        self.dir = tempfile.mkdtemp()
+        self.path = os.path.join(self.dir, "fake.json")
+        with open(self.path, "w") as fh:
+            json.dump(fixture("ipac2-1.55-keyboard.json"), fh)
+
+    def tearDown(self):
+        os.unlink(self.path)
+        os.rmdir(self.dir)
+
+    def test_the_firmware_byte_survives_a_write(self):
+        board = ic.FakeBoard(self.path)
+        self.assertEqual(board.info.firmware, "0.55")
+        board.write_config(ic.as_write_command(board.read_config()))
+        self.assertEqual(board.read_config()[2], 0x55)
+        self.assertEqual(ic.FakeBoard(self.path).info.firmware, "0.55")
+
+    def test_a_restore_puts_the_file_back_byte_for_byte(self):
+        original = fixture("ipac2-1.55-keyboard.json")["raw"]
+        board = ic.FakeBoard(self.path)
+        board.write_config(
+            ic.encode_config({"pins": [{"name": "1b", "alternate_action": "F1"}]},
+                             board.read_config()))
+        self.assertNotEqual(ic.load_profile(self.path)["raw"], original)
+        board.write_config(ic.as_write_command(bytes.fromhex(original)))
+        self.assertEqual(ic.load_profile(self.path)["raw"], original)
+
+
+class TestResolveSaved(SavedDirsCase):
+    """The security boundary: `serve` binds 0.0.0.0, so ids come off the LAN."""
+
+    def test_a_real_file_resolves(self):
+        path = self.save("ok.json", {"pins": []})
+        directory, resolved = ic.resolve_saved(self.dirs, "backups/ok.json")
+        self.assertEqual(resolved, os.path.realpath(path))
+        self.assertTrue(directory["writable"])
+
+    def test_traversal_is_refused(self):
+        for ident in (
+            "backups/../../etc/passwd",
+            "backups/../ipacconf.py",
+            "backups//etc/passwd",
+            "backups/subdir/x.json",
+            "backups/%s" % os.path.join(HERE, "ipacconf.py"),
+            "../fixtures/before-1.44.json",
+        ):
+            with self.assertRaises(ic.ProtocolError, msg=ident):
+                ic.resolve_saved(self.dirs, ident)
+
+    def test_a_symlink_out_of_the_directory_is_refused(self):
+        os.symlink(os.path.join(HERE, "ipacconf.py"),
+                   os.path.join(self.tmp, "escape.json"))
+        with self.assertRaises(ic.ProtocolError):
+            ic.resolve_saved(self.dirs, "backups/escape.json")
+
+    def test_non_json_names_are_refused(self):
+        with open(os.path.join(self.tmp, "notes.txt"), "w") as fh:
+            fh.write("hello")
+        with self.assertRaises(ic.ProtocolError):
+            ic.resolve_saved(self.dirs, "backups/notes.txt")
+
+    def test_unknown_sources_and_missing_files_are_refused(self):
+        for ident in ("elsewhere/x.json", "backups/nope.json", "backups", ""):
+            with self.assertRaises(ic.ProtocolError, msg=ident):
+                ic.resolve_saved(self.dirs, ident)
+
+    def test_a_preset_resolves_but_is_read_only(self):
+        directory, path = ic.resolve_saved(self.dirs, "presets/mame-keyboard.json")
+        self.assertFalse(directory["writable"])
+        self.assertTrue(os.path.isfile(path))
+
+
+class TestSetLabel(SavedDirsCase):
+    def test_round_trip(self):
+        path = self.save("x.json", {"pins": []})
+        ic.set_label(path, "good mame setup")
+        self.assertEqual(ic.load_profile(path)["label"], "good mame setup")
+        entry = [e for e in ic.list_saved(self.dirs) if e["name"] == "x.json"][0]
+        self.assertEqual(entry["label"], "good mame setup")
+
+    def test_a_label_does_not_disturb_the_raw_bytes(self):
+        dump = fixture("ipac2-1.55-keyboard.json")
+        path = self.save("dump.json", dump)
+        ic.set_label(path, "before the flash")
+        self.assertEqual(ic.load_profile(path)["raw"], dump["raw"])
+
+    def test_blank_clears_it(self):
+        path = self.save("x.json", {"pins": [], "label": "old"})
+        ic.set_label(path, "   ")
+        self.assertNotIn("label", ic.load_profile(path))
+
+    def test_labelling_does_not_restamp_the_file(self):
+        """Naming a backup is not saving it again - it must keep its place."""
+        path = self.save("x.json", {"pins": []}, mtime=1000)
+        ic.set_label(path, "keep")
+        self.assertEqual(int(os.stat(path).st_mtime), 1000)
+
+    def test_over_long_labels_are_trimmed(self):
+        path = self.save("x.json", {"pins": []})
+        ic.set_label(path, "z" * 500)
+        self.assertEqual(len(ic.load_profile(path)["label"]), ic.LABEL_MAX)
+
+
+class TestRestorePayload(unittest.TestCase):
+    def test_an_edited_profile_cannot_be_restored(self):
+        with self.assertRaises(ic.ProtocolError) as caught:
+            ic.raw_from_profile({"pins": []}, "edited.json")
+        self.assertIn("apply", str(caught.exception))
+
+    def test_the_wrong_number_of_bytes_is_refused(self):
+        with self.assertRaises(ic.ProtocolError):
+            ic.raw_from_profile({"raw": "50dd0f00"}, "short.json")
+
+    def test_non_hex_is_refused(self):
+        with self.assertRaises(ic.ProtocolError):
+            ic.raw_from_profile({"raw": "not hex at all"}, "junk.json")
+
+    def test_a_dump_restores_to_itself(self):
+        """Restoring a dump onto the board it came from must be a no-op."""
+        raw = bytes.fromhex(fixture("ipac2-1.55-keyboard.json")["raw"])
+        self.assertEqual(ic.diff_config(raw, ic.as_write_command(raw)), [])
+
+
+class TestMergeProfile(unittest.TestCase):
+    def test_a_partial_profile_leaves_other_pins_alone(self):
+        base = fixture("ipac2-1.55-keyboard.json")
+        incoming = ic.load_profile(
+            os.path.join(HERE, "profiles", "write-test.json"))
+        merged = ic.merge_profile(base, incoming)
+
+        before = {p["name"]: p for p in base["pins"]}
+        after = {p["name"]: p for p in merged["pins"]}
+        self.assertEqual(after["1b"]["alternate_action"], "F1")
+        self.assertEqual(after["1b"]["action"], before["1b"]["action"])
+        for name in after:
+            if name != "1b":
+                self.assertEqual(after[name], before[name], name)
+
+    def test_only_the_named_fields_are_reported_as_changed(self):
+        base = fixture("ipac2-1.55-keyboard.json")
+        incoming = ic.load_profile(
+            os.path.join(HERE, "profiles", "write-test.json"))
+        changed = ic.profile_changes(base, ic.merge_profile(base, incoming))
+        self.assertEqual(changed,
+                         [{"pin": "1b", "field": "alternate_action",
+                           "before": "", "after": "F1"}])
+
+    def test_a_pin_the_base_never_had_is_added(self):
+        base = {"pins": [{"name": "1up", "action": "UP"}]}
+        merged = ic.merge_profile(base, {"pins": [{"name": "1sw1", "action": "A"}]})
+        self.assertEqual([p["name"] for p in merged["pins"]], ["1up", "1sw1"])
+
+    def test_the_incoming_files_own_identity_does_not_survive(self):
+        """raw/firmware/label describe the file, not the merge."""
+        base = {"pins": []}
+        merged = ic.merge_profile(base, fixture("ipac2-1.55-keyboard.json"))
+        for key in ("raw", "firmware", "label"):
+            self.assertNotIn(key, merged)
+
+    def test_merging_a_full_dump_reproduces_it(self):
+        dump = fixture("ipac2-1.55-keyboard.json")
+        merged = ic.merge_profile(fixture("before-1.44.json"), dump)
+        self.assertEqual(ic.profile_changes(dump, merged), [])
+
+    def test_debounce_and_paclink_follow_the_import(self):
+        base = {"pins": [], "debounce": "standard", "paclink": False}
+        merged = ic.merge_profile(base, {"pins": [], "debounce": "long",
+                                         "paclink": True})
+        self.assertEqual(merged["debounce"], "long")
+        self.assertTrue(merged["paclink"])
+
+
+class TestImportNotes(unittest.TestCase):
+    def board(self, bcd=0x0055):
+        return ic.DeviceInfo("/dev/hidraw9", ic.VENDOR_2015, ic.PRODUCT_IPAC2,
+                             bcd, 2, "usb")
+
+    def raw(self, version=0x55):
+        """Raw bytes headed as a read response from that firmware."""
+        buf = bytearray(ic.CONFIG_SIZE)
+        buf[0], buf[1], buf[2] = 0x50, 0xDD, version
+        return bytes(buf).hex()
+
+    def test_a_matching_dump_says_nothing(self):
+        self.assertEqual(
+            ic.import_notes(fixture("ipac2-1.55-keyboard.json"), self.board()), [])
+
+    def test_a_firmware_mismatch_is_flagged(self):
+        notes = ic.import_notes(fixture("before-1.44.json"), self.board(0x0055))
+        self.assertTrue(any("0.44" in n and "0.55" in n for n in notes))
+
+    def test_a_profile_without_raw_says_it_cannot_be_restored(self):
+        notes = ic.import_notes({"pins": [{"name": "1b", "action": "F1"}]},
+                                self.board())
+        self.assertTrue(any("not restored byte for byte" in n
+                            or "byte for byte" in n for n in notes))
+
+    def test_a_partial_profile_says_how_many_pins_it_names(self):
+        notes = ic.import_notes({"raw": self.raw(),
+                                 "pins": [{"name": "1b", "action": "F1"}]},
+                                self.board())
+        self.assertTrue(any("1 of the 32 pins" in n for n in notes))
+
+    def test_macros_are_called_out(self):
+        notes = ic.import_notes(
+            {"raw": self.raw(),
+             "pins": [{"name": p, "action": "A"} for p in ic.PIN_ORDER],
+             "macros": [{"name": "MACRO 1", "action": ["A", "B"]}]},
+            self.board())
+        self.assertEqual(len(notes), 1)
+        self.assertIn("Restore exactly", notes[0])
+
+    def test_gamepad_codes_on_keyboard_firmware_warn(self):
+        notes = ic.import_notes(
+            {"raw": self.raw(0x44),
+             "pins": [{"name": p, "action": "GAMEPAD 1"} for p in ic.PIN_ORDER]},
+            self.board(0x0044))
+        self.assertTrue(any("keyboard-only" in n for n in notes))
+
+    def test_no_board_means_no_firmware_note(self):
+        self.assertEqual(ic.import_notes(fixture("before-1.44.json"), None), [])
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -13,6 +13,7 @@ Batocera box, whose root filesystem is read-only and has no pip.
     ipacconf.py apply p.json --dry-run   # show the byte diff, write nothing
     ipacconf.py apply p.json             # write it (backs up first)
     ipacconf.py restore before.json      # byte-exact restore
+    ipacconf.py saved                    # list backups and presets
     ipacconf.py serve                    # web UI on :8080
 
 Protocol sources: katie-snow/Ultimarc-linux (C) and katie-snow/QtPyUltimarc
@@ -869,9 +870,16 @@ class FakeBoard:
         )
         if os.path.exists(path):
             self._buf = bytearray(load_raw(path))
+            # Answer with the firmware the dump was taken from, so imports of
+            # that dump do not warn about a mismatch that is not real.
+            if self._buf[2] != HEADER_WRITE[2]:
+                self.info.bcd = self._buf[2]
         else:
             self._buf = bytearray(default_config())
             self._flush()
+        # A real board answers reads with its own header - 0x00 0x00 ver on
+        # 1.44, 0x50 0xdd ver on 1.55 - whatever header the write carried.
+        self._header = bytes(self._buf[:3])
 
     def _flush(self):
         with open(self.path, "w") as fh:
@@ -883,6 +891,7 @@ class FakeBoard:
 
     def write_config(self, buf: bytes):
         self._buf = bytearray(buf[:CONFIG_SIZE])
+        self._buf[0:3] = self._header
         self._flush()
 
     def close(self):
@@ -943,19 +952,27 @@ def load_profile(path) -> dict:
     return profile
 
 
-def load_raw(path) -> bytes:
+def raw_from_profile(profile: dict, origin: str) -> bytes:
     """Get the 256 raw bytes out of a dump, if it has them."""
-    profile = load_profile(path)
     raw = profile.get("raw")
     if not raw:
         raise ProtocolError(
             "%s has no 'raw' field - it is an edited profile, not a dump. "
-            "Use `apply` rather than `restore`." % path
+            "Use `apply` rather than `restore`." % origin
         )
-    buf = bytes.fromhex(raw)
+    try:
+        buf = bytes.fromhex(raw)
+    except (TypeError, ValueError):
+        raise ProtocolError("%s has a 'raw' field that is not hex" % origin)
     if len(buf) != CONFIG_SIZE:
-        raise ProtocolError("%s holds %d bytes, expected %d" % (path, len(buf), CONFIG_SIZE))
+        raise ProtocolError(
+            "%s holds %d bytes, expected %d" % (origin, len(buf), CONFIG_SIZE)
+        )
     return buf
+
+
+def load_raw(path) -> bytes:
+    return raw_from_profile(load_profile(path), path)
 
 
 def default_config() -> bytes:
@@ -1017,10 +1034,240 @@ def write_backup(profile: dict, directory: str) -> str:
     os.makedirs(directory, exist_ok=True)
     stamp = datetime.datetime.now().strftime("%Y%m%d-%H%M%S")
     path = os.path.join(directory, "ipac2-%s.json" % stamp)
+    # Restoring a backup takes a backup, and the two land in the same second.
+    # Without this the second one overwrites the file being restored from.
+    suffix = 2
+    while os.path.exists(path):
+        path = os.path.join(directory, "ipac2-%s-%d.json" % (stamp, suffix))
+        suffix += 1
     with open(path, "w") as fh:
         json.dump(profile, fh, indent=2)
         fh.write("\n")
     return path
+
+
+# --------------------------------------------------------------------------
+# Saved configurations
+#
+# Two directories are browsable: the backup directory, which we write to and
+# which the UI may relabel or delete from, and the profiles shipped alongside
+# this script, which are read only.
+# --------------------------------------------------------------------------
+
+PRESET_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "profiles")
+LABEL_MAX = 60
+SAVED_LIMIT = 200
+
+
+def saved_dirs(args=None) -> list:
+    """The directories the UI browses, newest-first source order."""
+    candidates = [
+        {
+            "source": "backups",
+            "path": backup_dir(getattr(args, "backup_dir", None)),
+            "writable": True,
+        },
+        {"source": "presets", "path": PRESET_DIR, "writable": False},
+    ]
+    return [d for d in candidates if os.path.isdir(d["path"])]
+
+
+def profile_firmware(profile: dict) -> str:
+    """Which firmware a saved config came off.
+
+    Dumps taken before firmware detection was fixed carry no 'firmware' key,
+    but their raw bytes still hold it in byte 2 - read it back out rather than
+    reporting those files as coming from nowhere.
+    """
+    firmware = profile.get("firmware")
+    if firmware:
+        return str(firmware)
+    try:
+        buf = bytes.fromhex(profile.get("raw") or "")
+    except (TypeError, ValueError):
+        return ""
+    if len(buf) < 4 or buf[2] == HEADER_WRITE[2]:
+        return ""
+    return "0.%02x" % buf[2]
+
+
+def _saved_entry(directory: dict, name: str) -> dict:
+    path = os.path.join(directory["path"], name)
+    entry = {
+        "id": "%s/%s" % (directory["source"], name),
+        "source": directory["source"],
+        "name": name,
+        "writable": directory["writable"],
+        "mtime": 0.0,
+        "size": 0,
+    }
+    try:
+        stat = os.stat(path)
+        entry["mtime"] = stat.st_mtime
+        entry["size"] = stat.st_size
+        profile = load_profile(path)
+    except (OSError, ValueError, ProtocolError) as exc:
+        # One unreadable file must not take the whole listing down with it.
+        entry["error"] = str(exc)
+        return entry
+    entry["label"] = str(profile.get("label") or "")
+    entry["firmware"] = profile_firmware(profile)
+    entry["pins"] = len(profile.get("pins") or [])
+    entry["macros"] = len(profile.get("macros") or [])
+    entry["has_raw"] = bool(profile.get("raw"))
+    return entry
+
+
+def list_saved(dirs, limit=SAVED_LIMIT) -> list:
+    """Every .json in the given directories, newest first."""
+    entries = []
+    for directory in dirs:
+        try:
+            names = sorted(os.listdir(directory["path"]))
+        except OSError:
+            continue
+        for name in names:
+            if name.startswith(".") or not name.endswith(".json"):
+                continue
+            if not os.path.isfile(os.path.join(directory["path"], name)):
+                continue
+            entries.append(_saved_entry(directory, name))
+    entries.sort(key=lambda e: (e["mtime"], e["name"]), reverse=True)
+    return entries[:limit]
+
+
+def resolve_saved(dirs, ident) -> tuple:
+    """Turn a "source/name" id from a request into a path we are willing to open.
+
+    This is the security boundary. `serve` binds 0.0.0.0 by default, so `ident`
+    is untrusted input off the LAN; nothing else in the server builds a path
+    out of request data.
+    """
+    source, _, name = str(ident).partition("/")
+    if not name:
+        raise ProtocolError("bad saved id %r - expected source/name.json" % ident)
+    if "/" in name or "\\" in name or name.startswith("."):
+        raise ProtocolError("bad saved name %r" % name)
+    if not name.endswith(".json"):
+        raise ProtocolError("%r is not a .json file" % name)
+    for directory in dirs:
+        if directory["source"] != source:
+            continue
+        root = os.path.realpath(directory["path"])
+        path = os.path.realpath(os.path.join(root, name))
+        # Catches a symlink pointing out of the directory, which the name
+        # checks above cannot see.
+        if not path.startswith(root + os.sep):
+            raise ProtocolError("%s is outside the %s directory" % (name, source))
+        if not os.path.isfile(path):
+            raise ProtocolError("no such saved config: %s" % ident)
+        return directory, path
+    raise ProtocolError("unknown source %r" % source)
+
+
+def set_label(path: str, label) -> dict:
+    """Name a saved config. The label lives in the file, so a copy keeps it."""
+    profile = load_profile(path)
+    label = " ".join(str(label or "").split())[:LABEL_MAX]
+    if label:
+        profile["label"] = label
+    else:
+        profile.pop("label", None)
+    stat = os.stat(path)
+    with open(path, "w") as fh:
+        json.dump(profile, fh, indent=2)
+        fh.write("\n")
+    # Naming a backup is not the same as saving it again: keep the timestamp,
+    # so relabelling does not shuffle it to the top of the list.
+    os.utime(path, (stat.st_atime, stat.st_mtime))
+    return profile
+
+
+def import_notes(profile: dict, info=None) -> list:
+    """What the user should know before writing this file to the board."""
+    notes = []
+    firmware = profile_firmware(profile)
+    if firmware and info is not None and firmware != info.firmware:
+        notes.append(
+            "Saved from firmware %s, but the board is running %s. The bytes "
+            "will still be written - check the diff before trusting them."
+            % (firmware, info.firmware)
+        )
+    if not profile.get("raw"):
+        notes.append(
+            "No raw bytes in this file, so it can be loaded into the form but "
+            "not restored byte for byte."
+        )
+    named = len(profile.get("pins") or [])
+    if named < len(PIN_ORDER):
+        notes.append(
+            "Names %d of the %d pins - the rest keep whatever the board "
+            "already has." % (named, len(PIN_ORDER))
+        )
+    if profile.get("macros"):
+        notes.append(
+            "Holds %d macro(s), which the pin form cannot show. Use "
+            "'Restore exactly' to keep them." % len(profile["macros"])
+        )
+    warning = _gamepad_warning(profile, info) if info is not None else None
+    if warning:
+        notes.append(" ".join(warning.split()))
+    return notes
+
+
+def merge_profile(base: dict, incoming: dict) -> dict:
+    """Overlay one profile's pins onto another, matching `apply` semantics.
+
+    A profile may name a single pin; pins it does not name keep what they
+    already had, exactly as the CLI's read-modify-write does.
+    """
+    merged = dict(base)
+    by_name = {}
+    order = []
+    for pin in base.get("pins") or []:
+        by_name[pin["name"]] = dict(pin)
+        order.append(pin["name"])
+    for pin in incoming.get("pins") or []:
+        name = pin.get("name")
+        if not name:
+            continue
+        if name not in by_name:
+            by_name[name] = {"name": name}
+            order.append(name)
+        by_name[name].update({k: v for k, v in pin.items() if k != "name"})
+    merged["pins"] = [by_name[name] for name in order]
+    for key in ("debounce", "paclink"):
+        if key in incoming:
+            merged[key] = incoming[key]
+    # The incoming file's raw bytes describe the incoming file, not the
+    # merge, and its firmware is the board it came off. Neither survives.
+    merged.pop("raw", None)
+    merged.pop("firmware", None)
+    merged.pop("label", None)
+    return merged
+
+
+PIN_FIELDS = ("action", "alternate_action", "shift")
+
+
+def profile_changes(before: dict, after: dict) -> list:
+    """Which pin fields differ, so the UI can highlight what an import touched."""
+    def index(profile):
+        return {p["name"]: p for p in (profile.get("pins") or []) if p.get("name")}
+
+    old, new = index(before), index(after)
+    out = []
+    for name in new:
+        for field in PIN_FIELDS:
+            was = old.get(name, {}).get(field, "")
+            now = new[name].get(field, "")
+            if field == "shift":
+                was, now = bool(was), bool(now)
+            if was != now:
+                out.append(
+                    {"pin": name, "field": field, "before": was, "after": now}
+                )
+    return out
 
 
 # --------------------------------------------------------------------------
@@ -1156,8 +1403,11 @@ def _gamepad_warning(profile: dict, info: DeviceInfo):
 
 
 def cmd_restore(args) -> int:
-    raw = as_write_command(load_raw(args.backup))
+    profile = load_profile(args.backup)
+    raw = as_write_command(raw_from_profile(profile, args.backup))
     with open_board(args) as board:
+        for note in import_notes(profile, board.info):
+            print("note: %s" % note, file=sys.stderr)
         current = board.read_config()
         changes = diff_config(current, raw)
         if not changes:
@@ -1171,8 +1421,41 @@ def cmd_restore(args) -> int:
                     _fmt_byte(change["before"]), _fmt_byte(change["after"])))
             print("\ndry run - nothing written")
             return 0
+        if not args.no_backup:
+            path = write_backup(decode_config(current), backup_dir(args.backup_dir))
+            print("backed up current config to %s" % path)
         board.write_config(raw)
         print("restored %s" % args.backup)
+    return 0
+
+
+def cmd_saved(args) -> int:
+    """List what the web UI's file browser lists, for use over SSH."""
+    dirs = saved_dirs(args)
+    if not dirs:
+        print("no saved configurations yet", file=sys.stderr)
+        return 0
+    for directory in dirs:
+        print("%s  %s" % (directory["source"], directory["path"]))
+    print()
+    for entry in list_saved(dirs):
+        when = datetime.datetime.fromtimestamp(entry["mtime"]).strftime(
+            "%Y-%m-%d %H:%M"
+        )
+        if entry.get("error"):
+            print("  %-8s %-34s unreadable: %s"
+                  % (entry["source"], entry["name"], entry["error"]))
+            continue
+        bits = ["%2d pin%s" % (entry["pins"], "" if entry["pins"] == 1 else "s")]
+        if entry["macros"]:
+            bits.append("%d macros" % entry["macros"])
+        if entry["firmware"]:
+            bits.append("fw %s" % entry["firmware"])
+        bits.append("restorable" if entry["has_raw"] else "form only")
+        print("  %-8s %-34s %s  %s" % (entry["source"], entry["name"], when,
+                                       ", ".join(bits)))
+        if entry["label"]:
+            print("  %-8s %s" % ("", entry["label"]))
     return 0
 
 
@@ -1231,7 +1514,13 @@ def build_parser() -> argparse.ArgumentParser:
     p = sub.add_parser("restore", help="write a dump back byte for byte", parents=[common])
     p.add_argument("backup")
     p.add_argument("--dry-run", action="store_true")
+    p.add_argument("--no-backup", action="store_true")
+    p.add_argument("--backup-dir")
     p.set_defaults(func=cmd_restore)
+
+    p = sub.add_parser("saved", help="list saved configs and presets", parents=[common])
+    p.add_argument("--backup-dir")
+    p.set_defaults(func=cmd_saved)
 
     p = sub.add_parser("serve", help="run the web UI", parents=[common])
     p.add_argument("--port", type=int, default=8080)
@@ -1286,6 +1575,7 @@ def _lan_address() -> str:
 
 def _make_handler(args):
     import http.server
+    import urllib.parse
 
     class Handler(http.server.BaseHTTPRequestHandler):
         server_version = "ipacconf/" + __version__
@@ -1317,13 +1607,76 @@ def _make_handler(args):
                 return {}
             return json.loads(self.rfile.read(length))
 
+        def _route(self):
+            """The request path, unescaped, with the query string dropped."""
+            return urllib.parse.unquote(urllib.parse.urlsplit(self.path).path)
+
+        def _saved(self, ident):
+            """Resolve an id from the URL. All path safety lives in here."""
+            return resolve_saved(saved_dirs(args), ident)
+
+        def _device_info(self):
+            """The board, or None - the file browser works without hardware."""
+            try:
+                with open_board(args) as board:
+                    return board.info
+            except (DeviceError, ProtocolError):
+                return None
+
+        def _send_file(self, path, name):
+            with open(path, "rb") as fh:
+                body = fh.read()
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.send_header(
+                "Content-Disposition", 'attachment; filename="%s"' % name
+            )
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+
+        def _changes_result(self, board, current, updated, profile):
+            """The response shape shared by apply and restore."""
+            changes = diff_config(current, updated)
+            return {
+                "changes": [
+                    {
+                        "offset": c["offset"],
+                        "meaning": c["meaning"],
+                        "before": _fmt_byte(c["before"]),
+                        "after": _fmt_byte(c["after"]),
+                    }
+                    for c in changes
+                ],
+                "warning": _gamepad_warning(profile, board.info),
+                "written": False,
+            }
+
         # -- routes
 
         def do_GET(self):
             try:
-                if self.path in ("/", "/index.html"):
+                path = self._route()
+                if path in ("/", "/index.html"):
                     return self._html(PAGE)
-                if self.path == "/api/codes":
+                if path == "/api/saved":
+                    return self._json({"saved": list_saved(saved_dirs(args))})
+                if path.startswith("/api/saved/"):
+                    ident = path[len("/api/saved/"):]
+                    if ident.endswith("/download"):
+                        directory, full = self._saved(ident[: -len("/download")])
+                        return self._send_file(full, os.path.basename(full))
+                    directory, full = self._saved(ident)
+                    profile = load_profile(full)
+                    return self._json(
+                        {
+                            "id": ident,
+                            "writable": directory["writable"],
+                            "profile": profile,
+                            "notes": import_notes(profile, self._device_info()),
+                        }
+                    )
+                if path == "/api/codes":
                     return self._json(
                         {
                             "groups": [
@@ -1336,12 +1689,12 @@ def _make_handler(args):
                             ],
                         }
                     )
-                if self.path == "/api/device":
+                if path == "/api/device":
                     with open_board(args) as board:
                         info = board.info.as_dict()
                     info["fake"] = bool(getattr(args, "fake_device", None))
                     return self._json(info)
-                if self.path == "/api/config":
+                if path == "/api/config":
                     with open_board(args) as board:
                         return self._json(decode_config(board.read_config()))
                 self._json({"error": "not found"}, 404)
@@ -1352,41 +1705,111 @@ def _make_handler(args):
 
         def do_POST(self):
             try:
-                if self.path not in ("/api/config", "/api/config?dry_run=1"):
-                    return self._json({"error": "not found"}, 404)
+                path = self._route()
                 payload = self._body()
-                profile = payload.get("profile") or {}
-                dry_run = bool(payload.get("dry_run"))
-
-                with open_board(args) as board:
-                    current = board.read_config()
-                    updated = bytes(encode_config(profile, current))
-                    changes = diff_config(current, updated)
-                    result = {
-                        "changes": [
-                            {
-                                "offset": c["offset"],
-                                "meaning": c["meaning"],
-                                "before": _fmt_byte(c["before"]),
-                                "after": _fmt_byte(c["after"]),
-                            }
-                            for c in changes
-                        ],
-                        "warning": _gamepad_warning(profile, board.info),
-                        "written": False,
-                    }
-                    if not dry_run and changes:
-                        result["backup"] = write_backup(
-                            decode_config(current),
-                            backup_dir(getattr(args, "backup_dir", None)),
+                if path == "/api/config":
+                    return self._apply(payload)
+                if path == "/api/restore":
+                    return self._restore(payload)
+                if path.startswith("/api/saved/") and path.endswith("/label"):
+                    ident = path[len("/api/saved/"): -len("/label")]
+                    directory, full = self._saved(ident)
+                    if not directory["writable"]:
+                        return self._json(
+                            {"error": "%s files are read only" % directory["source"]},
+                            403,
                         )
-                        board.write_config(updated)
-                        result["written"] = True
-                    return self._json(result)
+                    set_label(full, payload.get("label"))
+                    return self._json({"saved": list_saved(saved_dirs(args))})
+                if path == "/api/import":
+                    return self._import(payload)
+                return self._json({"error": "not found"}, 404)
             except (DeviceError, ProtocolError) as exc:
                 self._json({"error": str(exc)}, 500)
             except Exception as exc:  # noqa: BLE001
                 self._json({"error": "%s: %s" % (type(exc).__name__, exc)}, 500)
+
+        def do_DELETE(self):
+            try:
+                path = self._route()
+                if not path.startswith("/api/saved/"):
+                    return self._json({"error": "not found"}, 404)
+                directory, full = self._saved(path[len("/api/saved/"):])
+                if not directory["writable"]:
+                    return self._json(
+                        {"error": "%s files are read only" % directory["source"]}, 403
+                    )
+                os.remove(full)
+                return self._json(
+                    {"deleted": os.path.basename(full),
+                     "saved": list_saved(saved_dirs(args))}
+                )
+            except (DeviceError, ProtocolError) as exc:
+                self._json({"error": str(exc)}, 500)
+            except Exception as exc:  # noqa: BLE001
+                self._json({"error": "%s: %s" % (type(exc).__name__, exc)}, 500)
+
+        # -- board writes
+
+        def _apply(self, payload):
+            profile = payload.get("profile") or {}
+            dry_run = bool(payload.get("dry_run"))
+            with open_board(args) as board:
+                current = board.read_config()
+                updated = bytes(encode_config(profile, current))
+                result = self._changes_result(board, current, updated, profile)
+                if not dry_run and result["changes"]:
+                    result["backup"] = self._backup(current)
+                    board.write_config(updated)
+                    result["written"] = True
+                return self._json(result)
+
+        def _incoming(self, payload):
+            """The profile a request wants to use: a saved file, or an upload."""
+            source = payload.get("source")
+            if source:
+                _, full = self._saved(source)
+                return load_profile(full), os.path.basename(full)
+            profile = payload.get("profile")
+            if not isinstance(profile, dict):
+                raise ProtocolError("expected a profile object or a source id")
+            return profile, str(payload.get("name") or "the imported file")
+
+        def _import(self, payload):
+            """Merge a saved profile into the form's current state."""
+            incoming, origin = self._incoming(payload)
+            base = payload.get("base") or {}
+            merged = merge_profile(base, incoming)
+            return self._json(
+                {
+                    "source": origin,
+                    "profile": merged,
+                    "changed": profile_changes(base, merged),
+                    "notes": import_notes(incoming, self._device_info()),
+                }
+            )
+
+        def _restore(self, payload):
+            """Byte-exact: write a dump's 256 bytes back, macros and all."""
+            dry_run = bool(payload.get("dry_run"))
+            profile, origin = self._incoming(payload)
+            updated = as_write_command(raw_from_profile(profile, origin))
+
+            with open_board(args) as board:
+                current = board.read_config()
+                result = self._changes_result(board, current, updated, profile)
+                result["source"] = origin
+                result["notes"] = import_notes(profile, board.info)
+                if not dry_run and result["changes"]:
+                    result["backup"] = self._backup(current)
+                    board.write_config(updated)
+                    result["written"] = True
+                return self._json(result)
+
+        def _backup(self, current):
+            return write_backup(
+                decode_config(current), backup_dir(getattr(args, "backup_dir", None))
+            )
 
     return Handler
 
@@ -1448,6 +1871,17 @@ PAGE = """<!doctype html>
         font-family: ui-monospace, SFMono-Regular, Menlo, monospace; }
   dl { display: grid; grid-template-columns: max-content 1fr; gap: .15rem .8rem; margin: 0; }
   dt { color: var(--muted); }
+  button.small { padding: .25rem .55rem; font-size: .82rem; }
+  button.danger { color: var(--err); }
+  .badge { font-size: .72rem; text-transform: uppercase; letter-spacing: .04em;
+           border: 1px solid var(--line); border-radius: 4px;
+           padding: .05rem .35rem; color: var(--muted); }
+  .name { font-weight: 600; }
+  .when { font-size: .82rem; color: var(--muted); white-space: nowrap; }
+  .changed { outline: 2px solid var(--accent); outline-offset: 1px; }
+  ul.notes { margin: .4rem 0 0; padding-left: 1.1rem; }
+  ul.notes li { margin: .15rem 0; }
+  input[type=file] { font: inherit; max-width: 100%; }
 </style>
 </head>
 <body>
@@ -1489,11 +1923,27 @@ PAGE = """<!doctype html>
     mode.</p>
   </div>
 
+  <div class="card">
+    <h2 style="margin-top:0">Saved configurations</h2>
+    <p class="muted"><strong>Load into form</strong> fills the dropdowns below so
+    you can review and edit before writing - pins the file does not name keep
+    what the board already has. <strong>Restore exactly</strong> writes all 256
+    bytes straight back, including macros the form cannot show. Either way the
+    board's current config is backed up first.</p>
+    <div id="saved"><span class="muted">looking for saved files...</span></div>
+    <div id="savedStatus"></div>
+    <div class="row" style="margin-top:.75rem">
+      <label class="muted" for="upload">From this device:</label>
+      <input type="file" id="upload" accept="application/json,.json">
+    </div>
+    <div id="uploadRow"></div>
+  </div>
+
   <div class="card" id="pins"><span class="muted">loading...</span></div>
 </main>
 <script>
 const $ = (s) => document.querySelector(s);
-let CODES = null, PROFILE = null;
+let CODES = null, PROFILE = null, SAVED = [], UPLOAD = null;
 
 async function api(path, opts) {
   const res = await fetch(path, opts);
@@ -1501,8 +1951,20 @@ async function api(path, opts) {
   if (data.error) throw new Error(data.error);
   return data;
 }
-function say(html, cls) {
-  $('#status').innerHTML = html ? `<div class="banner ${cls||''}">${html}</div>` : '';
+function post(path, body) {
+  return api(path, {
+    method: 'POST', headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify(body),
+  });
+}
+function banner(sel, html, cls) {
+  $(sel).innerHTML = html ? `<div class="banner ${cls||''}">${html}</div>` : '';
+}
+function say(html, cls) { banner('#status', html, cls); }
+function saySaved(html, cls) { banner('#savedStatus', html, cls); }
+function notesHtml(notes) {
+  if (!notes || !notes.length) return '';
+  return `<ul class="notes">${notes.map(n => `<li>${esc(n)}</li>`).join('')}</ul>`;
 }
 function esc(s) {
   return String(s).replace(/[&<>"]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
@@ -1524,19 +1986,21 @@ function optionsHtml(selected) {
   return html;
 }
 
-function renderPins() {
+function renderPins(changed) {
   const byName = {};
   for (const pin of (PROFILE.pins || [])) byName[pin.name] = pin;
+  const marked = new Set((changed || []).map(c => `${c.pin}.${c.field}`));
   let html = '';
   for (const group of CODES.pin_groups) {
     html += `<h2>${esc(group.label)}</h2><table><tr>
       <th>pin</th><th>action</th><th>alternate (shifted)</th><th>is shift key</th></tr>`;
     for (const name of group.pins) {
       const pin = byName[name] || {};
+      const mark = (field) => marked.has(`${name}.${field}`) ? ' class="changed"' : '';
       html += `<tr><td class="pin">${esc(name)}</td>
-        <td><select data-pin="${name}" data-field="action">${optionsHtml(pin.action || '')}</select></td>
-        <td><select data-pin="${name}" data-field="alternate_action">${optionsHtml(pin.alternate_action || '')}</select></td>
-        <td><input type="checkbox" data-pin="${name}" data-field="shift" ${pin.shift ? 'checked' : ''}></td>
+        <td><select${mark('action')} data-pin="${name}" data-field="action">${optionsHtml(pin.action || '')}</select></td>
+        <td><select${mark('alternate_action')} data-pin="${name}" data-field="alternate_action">${optionsHtml(pin.alternate_action || '')}</select></td>
+        <td><input${mark('shift')} type="checkbox" data-pin="${name}" data-field="shift" ${pin.shift ? 'checked' : ''}></td>
       </tr>`;
     }
     html += '</table>';
@@ -1559,16 +2023,22 @@ function collect() {
   };
 }
 
-function renderChanges(result) {
-  if (!result.changes.length) return say('No change - the board already matches this.', 'ok');
+function renderChanges(result, target) {
+  target = target || '#status';
+  const what = result.source ? ` ${esc(result.source)}` : '';
+  if (!result.changes.length) {
+    return banner(target, `No change - the board already matches${what || ' this'}.`
+      + notesHtml(result.notes), 'ok');
+  }
   const rows = result.changes.map(c =>
     `[${String(c.offset).padStart(3)}] ${c.meaning.padEnd(18)} ${c.before} -> ${c.after}`).join('\\n');
   const head = result.written
-    ? `<strong>Written.</strong> ${result.backup ? 'Backup: ' + esc(result.backup) : ''}`
+    ? `<strong>Written${what}.</strong> ${result.backup ? 'Backup: ' + esc(result.backup) : ''}`
     : `<strong>${result.changes.length} byte(s) would change.</strong>`;
-  say(`${head}<pre>${esc(rows)}</pre>`, result.written ? 'ok' : '');
+  banner(target, `${head}${notesHtml(result.notes)}<pre>${esc(rows)}</pre>`,
+         result.written ? 'ok' : '');
   if (result.warning) {
-    $('#status').insertAdjacentHTML('afterbegin',
+    $(target).insertAdjacentHTML('afterbegin',
       `<div class="banner warn">${esc(result.warning)}</div>`);
   }
 }
@@ -1599,15 +2069,179 @@ async function loadConfig() {
 async function send(dry) {
   say('working...');
   try {
-    renderChanges(await api('/api/config', {
-      method: 'POST', headers: {'Content-Type': 'application/json'},
-      body: JSON.stringify({ profile: collect(), dry_run: dry }),
-    }));
-    if (!dry) loadConfig();
+    renderChanges(await post('/api/config', { profile: collect(), dry_run: dry }));
+    if (!dry) { loadConfig(); loadSaved(); }
   } catch (err) {
     say(esc(err.message), 'err');
   }
 }
+
+// -- saved configurations
+
+function savedUrl(id, suffix) {
+  const [source, ...rest] = String(id).split('/');
+  return `/api/saved/${encodeURIComponent(source)}/`
+    + `${encodeURIComponent(rest.join('/'))}${suffix || ''}`;
+}
+function holdsText(e) {
+  if (e.error) return 'unreadable: ' + e.error;
+  const bits = [`${e.pins} pins`];
+  if (e.macros) bits.push(`${e.macros} macros`);
+  if (e.firmware) bits.push(`fw ${e.firmware}`);
+  return bits.join(', ');
+}
+
+function renderSaved() {
+  if (!SAVED.length) {
+    $('#saved').innerHTML = '<p class="muted">Nothing saved yet. Every write to '
+      + 'the board leaves a backup here.</p>';
+    return;
+  }
+  let html = '<table><tr><th>file</th><th>saved</th><th>holds</th><th></th></tr>';
+  for (const e of SAVED) {
+    const title = e.label
+      ? `<span class="name">${esc(e.label)}</span><div class="muted">${esc(e.name)}</div>`
+      : `<span class="name">${esc(e.name)}</span>`;
+    let buttons = '';
+    if (!e.error) {
+      buttons += `<button class="small" data-act="load" data-id="${esc(e.id)}">Load into form</button>`;
+      if (e.has_raw) {
+        buttons += `<button class="small" data-act="restore" data-id="${esc(e.id)}">Restore exactly</button>`;
+        buttons += `<button class="small" data-act="compare" data-id="${esc(e.id)}">Compare to board</button>`;
+      }
+    }
+    buttons += `<button class="small" data-act="download" data-id="${esc(e.id)}">Download</button>`;
+    if (e.writable) {
+      // An unreadable file cannot be relabelled - only removed.
+      if (!e.error) {
+        buttons += `<button class="small" data-act="label" data-id="${esc(e.id)}">Label</button>`;
+      }
+      buttons += `<button class="small danger" data-act="delete" data-id="${esc(e.id)}">Delete</button>`;
+    }
+    html += `<tr><td>${title} <span class="badge">${esc(e.source)}</span></td>
+      <td class="when">${esc(e.mtime ? new Date(e.mtime * 1000).toLocaleString() : '')}</td>
+      <td class="muted">${esc(holdsText(e))}</td>
+      <td><div class="row">${buttons}</div></td></tr>`;
+  }
+  $('#saved').innerHTML = html + '</table>';
+}
+
+async function loadSaved() {
+  try {
+    SAVED = (await api('/api/saved')).saved;
+    renderSaved();
+  } catch (err) {
+    $('#saved').innerHTML = `<div class="banner err">${esc(err.message)}</div>`;
+  }
+}
+
+// Merge a saved profile into the form. The server does the merging so that
+// "pins it does not name keep what they have" means the same thing here as it
+// does for `apply` on the command line.
+async function importInto(source) {
+  saySaved('working...');
+  try {
+    const res = await post('/api/import', Object.assign({ base: collect() }, source));
+    PROFILE = res.profile;
+    renderPins(res.changed);
+    const n = res.changed.length;
+    saySaved(`<strong>Loaded ${esc(res.source)} into the form.</strong> `
+      + (n ? `${n} field(s) highlighted below. ` : 'It matches the form already. ')
+      + 'Nothing reaches the board until you press <em>Write to board</em>.'
+      + notesHtml(res.notes), n ? '' : 'ok');
+  } catch (err) {
+    saySaved(esc(err.message), 'err');
+  }
+}
+
+async function restoreExactly(source, name, dry) {
+  if (!dry && !confirm(`Restore ${name} exactly?\\n\\n`
+      + 'This writes all 256 bytes back to the board - every pin, plus any '
+      + 'macros - replacing what is on it now. The current config is backed '
+      + 'up first.')) return;
+  saySaved('working...');
+  try {
+    renderChanges(await post('/api/restore',
+      Object.assign({ dry_run: dry }, source)), '#savedStatus');
+    if (!dry) { loadConfig(); loadSaved(); }
+  } catch (err) {
+    saySaved(esc(err.message), 'err');
+  }
+}
+
+async function relabel(id, current) {
+  const label = prompt('Name this saved config (blank to clear):', current || '');
+  if (label === null) return;
+  try {
+    SAVED = (await post(savedUrl(id, '/label'), { label })).saved;
+    renderSaved();
+  } catch (err) {
+    saySaved(esc(err.message), 'err');
+  }
+}
+
+async function removeSaved(id, name) {
+  if (!confirm(`Delete ${name} from the cabinet? This cannot be undone.`)) return;
+  try {
+    const res = await api(savedUrl(id), { method: 'DELETE' });
+    SAVED = res.saved;
+    renderSaved();
+    saySaved(`Deleted ${esc(res.deleted)}.`, 'ok');
+  } catch (err) {
+    saySaved(esc(err.message), 'err');
+  }
+}
+
+function renderUpload() {
+  if (!UPLOAD) { $('#uploadRow').innerHTML = ''; return; }
+  const raw = !!UPLOAD.profile.raw;
+  $('#uploadRow').innerHTML = `<div class="row" style="margin-top:.5rem">
+    <span class="name">${esc(UPLOAD.name)}</span>
+    <button class="small" id="upLoad">Load into form</button>
+    ${raw
+      ? '<button class="small" id="upRestore">Restore exactly</button>'
+        + '<button class="small" id="upCompare">Compare to board</button>'
+      : '<span class="muted">no raw bytes in this file - form only</span>'}
+  </div>`;
+  const src = { profile: UPLOAD.profile, name: UPLOAD.name };
+  $('#upLoad').onclick = () => importInto(src);
+  if (raw) {
+    $('#upRestore').onclick = () => restoreExactly(src, UPLOAD.name, false);
+    $('#upCompare').onclick = () => restoreExactly(src, UPLOAD.name, true);
+  }
+}
+
+$('#saved').addEventListener('click', (ev) => {
+  const btn = ev.target.closest('button[data-act]');
+  if (!btn) return;
+  const id = btn.dataset.id;
+  const entry = SAVED.find(e => e.id === id) || { name: id };
+  switch (btn.dataset.act) {
+    case 'load': return importInto({ source: id });
+    case 'restore': return restoreExactly({ source: id }, entry.name, false);
+    case 'compare': return restoreExactly({ source: id }, entry.name, true);
+    case 'download': window.location = savedUrl(id, '/download'); return;
+    case 'label': return relabel(id, entry.label);
+    case 'delete': return removeSaved(id, entry.name);
+  }
+});
+
+$('#upload').onchange = async (ev) => {
+  const file = ev.target.files && ev.target.files[0];
+  UPLOAD = null;
+  if (!file) return renderUpload();
+  try {
+    const profile = JSON.parse(await file.text());
+    if (!profile || typeof profile !== 'object' || Array.isArray(profile)) {
+      throw new Error('not a profile object');
+    }
+    UPLOAD = { name: file.name, profile };
+    saySaved('');
+  } catch (err) {
+    saySaved(`Could not read ${esc(file.name)} as a profile: ${esc(err.message)}`, 'err');
+  }
+  renderUpload();
+};
 
 $('#read').onclick = () => { say(''); loadConfig(); };
 $('#preview').onclick = () => send(true);
@@ -1626,6 +2260,7 @@ $('#download').onclick = () => {
   CODES = await api('/api/codes');
   await loadDevice();
   await loadConfig();
+  await loadSaved();
 })();
 </script>
 </body>
