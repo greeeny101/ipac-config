@@ -8,100 +8,132 @@
   "paclink": false,
   "pins": [
     {
+      "name": "1up",
+      "action": "GP1 Hat0 Up"
+    },
+    {
+      "name": "1down",
+      "action": "GP1 Hat0 Down"
+    },
+    {
+      "name": "1left",
+      "action": "GP1 Hat0 Left"
+    },
+    {
+      "name": "1right",
+      "action": "GP1 Hat0 Right"
+    },
+    {
       "name": "1sw1",
-      "action": "GAMEPAD 1"
+      "action": "GP1 South (A / Cross)"
     },
     {
       "name": "1sw2",
-      "action": "GAMEPAD 2"
+      "action": "GP1 East (B / Circle)"
     },
     {
       "name": "1sw3",
-      "action": "GAMEPAD 3"
+      "action": "GP1 West (Y / Square)"
     },
     {
       "name": "1sw4",
-      "action": "GAMEPAD 4"
+      "action": "GP1 North (X / Triangle)"
     },
     {
       "name": "1sw5",
-      "action": "GAMEPAD 5"
+      "action": "GP1 L1 (Left Shoulder)"
     },
     {
       "name": "1sw6",
-      "action": "GAMEPAD 6"
+      "action": "GP1 R1 (Right Shoulder)"
     },
     {
       "name": "1sw7",
-      "action": "GAMEPAD 7"
+      "action": "GP1 L2 (Left Trigger)"
     },
     {
       "name": "1sw8",
-      "action": "GAMEPAD 8"
+      "action": "GP1 R2 (Right Trigger)"
     },
     {
       "name": "1start",
-      "action": "GAMEPAD 9"
+      "action": "GP1 Start"
     },
     {
       "name": "1coin",
-      "action": "GAMEPAD 10"
+      "action": "GP1 Coin"
     },
     {
       "name": "1a",
-      "action": "GAMEPAD 11"
+      "action": "GP1 Select"
     },
     {
       "name": "1b",
-      "action": "GAMEPAD 12"
+      "action": "GP1 Hotkey"
+    },
+    {
+      "name": "2up",
+      "action": "GP2 Hat1 Up"
+    },
+    {
+      "name": "2down",
+      "action": "GP2 Hat1 Down"
+    },
+    {
+      "name": "2left",
+      "action": "GP2 Hat1 Left"
+    },
+    {
+      "name": "2right",
+      "action": "GP2 Hat1 Right"
     },
     {
       "name": "2sw1",
-      "action": "GAMEPAD 1"
+      "action": "GP2 South (A / Cross)"
     },
     {
       "name": "2sw2",
-      "action": "GAMEPAD 2"
+      "action": "GP2 East (B / Circle)"
     },
     {
       "name": "2sw3",
-      "action": "GAMEPAD 3"
+      "action": "GP2 West (Y / Square)"
     },
     {
       "name": "2sw4",
-      "action": "GAMEPAD 4"
+      "action": "GP2 North (X / Triangle)"
     },
     {
       "name": "2sw5",
-      "action": "GAMEPAD 5"
+      "action": "GP2 L1 (Left Shoulder)"
     },
     {
       "name": "2sw6",
-      "action": "GAMEPAD 6"
+      "action": "GP2 R1 (Right Shoulder)"
     },
     {
       "name": "2sw7",
-      "action": "GAMEPAD 7"
+      "action": "GP2 L2 (Left Trigger)"
     },
     {
       "name": "2sw8",
-      "action": "GAMEPAD 8"
+      "action": "GP2 R2 (Right Trigger)"
     },
     {
       "name": "2start",
-      "action": "GAMEPAD 9"
+      "action": "GP2 Start"
     },
     {
       "name": "2coin",
-      "action": "GAMEPAD 10"
+      "action": "GP2 Coin"
     },
     {
       "name": "2a",
-      "action": "GAMEPAD 11"
+      "action": "GP2 Select"
     },
     {
       "name": "2b",
-      "action": "GAMEPAD 12"
+      "action": "GP2 Hotkey"
     }
   ]
 }
