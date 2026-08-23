@@ -154,3 +154,26 @@ UI. Don't, unless there's a specific reason: the board keeps its configuration
 in flash, so it already survives reboots, reinstalls and being moved to another
 machine. Writing on every boot spends flash write cycles to achieve nothing.
 Configure it once, and let the board remember.
+
+**Getting the joystick working in Dinput.** If Batocera detects the I-PAC pads
+but the stick does nothing, the board's stock map has the four directions on
+separate buttons and EmulationStation will not take those as a d-pad. Write a
+profile with the directions on `HAT 1` — in keyboard mode — then switch to
+Dinput:
+
+```sh
+# hold Start1+P1SW1 ten seconds -> keyboard
+ipacconf.py apply /userdata/system/ipac-config/profiles/your-gamepad.json
+# hold Start1+P1SW2 ten seconds -> Dinput
+```
+
+`dump` does not report the live config while in Dinput, so check your work in
+keyboard mode or by behaviour, not by dumping in Dinput.
+
+**One caveat on persistence.** That only holds for a write made in keyboard mode. In Dinput
+the board takes the write, acts on it, and never commits it — so the config
+looks right until the next power cycle and then reverts. `apply` refuses to
+write in Dinput for this reason. If you want the board in Dinput, switch to
+keyboard (`Start1+P1SW1`, ten seconds), write, then switch back with
+`Start1+P1SW2`; the mode is not part of the config, so the switch back leaves
+your profile alone.

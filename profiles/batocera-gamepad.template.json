@@ -1,6 +1,7 @@
 {
   "_comment": "NOT NEEDED FOR NORMAL USE, AND UNVERIFIED. On firmware 1.50+ the board becomes two game controllers simply by switching to Dinput mode (hold Start1+P1SW2 for 10 seconds); the pin-to-button mapping is internal and the config block is not involved - a keyboard-mode dump and a Dinput-mode dump are byte-identical. This file exists only for the untested case of wanting custom per-pin gamepad button assignments.",
-  "_sticks_note": "Stick pins (1up/1down/1left/1right, 2up/...) are deliberately absent. Pins a profile does not mention keep whatever the board already has, so this file will not break your sticks. Whether directions want HAT 0..3, ANALOG 0..7 or GAMEPAD codes is the open question the dump diff answers - add them here once known.",
+  "_sticks_note": "Stick pins (1up/1down/1left/1right, 2up/...) carry a description but no action on purpose. Pins a profile does not assign an action to keep whatever the board already has, so this file will not break your sticks. The descriptions record what Batocera expects each direction to be; whether the board wants HAT 0..3, ANALOG 0..7 or GAMEPAD codes to produce it is the open question the dump diff answers - add an \"action\" to these four pins per player once known.",
+  "_description_note": "\"description\" is a label only. It is what the web UI shows next to the pin; the board is programmed from \"action\". Both players send GAMEPAD 1..12 because in Dinput mode each player is a separate controller and the two share one code range - the GP1/GP2 prefix is for the reader, not the board.",
   "schemaVersion": 2.0,
   "resourceType": "ipac2-pins",
   "deviceClass": "ipac2",
@@ -9,131 +10,155 @@
   "pins": [
     {
       "name": "1up",
-      "action": "GP1 Hat0 Up"
+      "description": "GP1 Hat0 Up"
     },
     {
       "name": "1down",
-      "action": "GP1 Hat0 Down"
+      "description": "GP1 Hat0 Down"
     },
     {
       "name": "1left",
-      "action": "GP1 Hat0 Left"
+      "description": "GP1 Hat0 Left"
     },
     {
       "name": "1right",
-      "action": "GP1 Hat0 Right"
+      "description": "GP1 Hat0 Right"
     },
     {
       "name": "1sw1",
-      "action": "GP1 South (A / Cross)"
+      "action": "GAMEPAD 1",
+      "description": "GP1 South (A / Cross)"
     },
     {
       "name": "1sw2",
-      "action": "GP1 East (B / Circle)"
+      "action": "GAMEPAD 2",
+      "description": "GP1 East (B / Circle)"
     },
     {
       "name": "1sw3",
-      "action": "GP1 West (Y / Square)"
+      "action": "GAMEPAD 3",
+      "description": "GP1 West (Y / Square)"
     },
     {
       "name": "1sw4",
-      "action": "GP1 North (X / Triangle)"
+      "action": "GAMEPAD 4",
+      "description": "GP1 North (X / Triangle)"
     },
     {
       "name": "1sw5",
-      "action": "GP1 L1 (Left Shoulder)"
+      "action": "GAMEPAD 5",
+      "description": "GP1 L1 (Left Shoulder)"
     },
     {
       "name": "1sw6",
-      "action": "GP1 R1 (Right Shoulder)"
+      "action": "GAMEPAD 6",
+      "description": "GP1 R1 (Right Shoulder)"
     },
     {
       "name": "1sw7",
-      "action": "GP1 L2 (Left Trigger)"
+      "action": "GAMEPAD 7",
+      "description": "GP1 L2 (Left Trigger)"
     },
     {
       "name": "1sw8",
-      "action": "GP1 R2 (Right Trigger)"
+      "action": "GAMEPAD 8",
+      "description": "GP1 R2 (Right Trigger)"
     },
     {
       "name": "1start",
-      "action": "GP1 Start"
+      "action": "GAMEPAD 9",
+      "description": "GP1 Start"
     },
     {
       "name": "1coin",
-      "action": "GP1 Coin"
+      "action": "GAMEPAD 10",
+      "description": "GP1 Coin"
     },
     {
       "name": "1a",
-      "action": "GP1 Select"
+      "action": "GAMEPAD 11",
+      "description": "GP1 Select"
     },
     {
       "name": "1b",
-      "action": "GP1 Hotkey"
+      "action": "GAMEPAD 12",
+      "description": "GP1 Hotkey"
     },
     {
       "name": "2up",
-      "action": "GP2 Hat1 Up"
+      "description": "GP2 Hat1 Up"
     },
     {
       "name": "2down",
-      "action": "GP2 Hat1 Down"
+      "description": "GP2 Hat1 Down"
     },
     {
       "name": "2left",
-      "action": "GP2 Hat1 Left"
+      "description": "GP2 Hat1 Left"
     },
     {
       "name": "2right",
-      "action": "GP2 Hat1 Right"
+      "description": "GP2 Hat1 Right"
     },
     {
       "name": "2sw1",
-      "action": "GP2 South (A / Cross)"
+      "action": "GAMEPAD 1",
+      "description": "GP2 South (A / Cross)"
     },
     {
       "name": "2sw2",
-      "action": "GP2 East (B / Circle)"
+      "action": "GAMEPAD 2",
+      "description": "GP2 East (B / Circle)"
     },
     {
       "name": "2sw3",
-      "action": "GP2 West (Y / Square)"
+      "action": "GAMEPAD 3",
+      "description": "GP2 West (Y / Square)"
     },
     {
       "name": "2sw4",
-      "action": "GP2 North (X / Triangle)"
+      "action": "GAMEPAD 4",
+      "description": "GP2 North (X / Triangle)"
     },
     {
       "name": "2sw5",
-      "action": "GP2 L1 (Left Shoulder)"
+      "action": "GAMEPAD 5",
+      "description": "GP2 L1 (Left Shoulder)"
     },
     {
       "name": "2sw6",
-      "action": "GP2 R1 (Right Shoulder)"
+      "action": "GAMEPAD 6",
+      "description": "GP2 R1 (Right Shoulder)"
     },
     {
       "name": "2sw7",
-      "action": "GP2 L2 (Left Trigger)"
+      "action": "GAMEPAD 7",
+      "description": "GP2 L2 (Left Trigger)"
     },
     {
       "name": "2sw8",
-      "action": "GP2 R2 (Right Trigger)"
+      "action": "GAMEPAD 8",
+      "description": "GP2 R2 (Right Trigger)"
     },
     {
       "name": "2start",
-      "action": "GP2 Start"
+      "action": "GAMEPAD 9",
+      "description": "GP2 Start"
     },
     {
       "name": "2coin",
-      "action": "GP2 Coin"
+      "action": "GAMEPAD 10",
+      "description": "GP2 Coin"
     },
     {
       "name": "2a",
-      "action": "GP2 Select"
+      "action": "GAMEPAD 11",
+      "description": "GP2 Select"
     },
     {
       "name": "2b",
-      "action": "GP2 Hotkey"
+      "action": "GAMEPAD 12",
+      "description": "GP2 Hotkey"
     }
   ]
 }
