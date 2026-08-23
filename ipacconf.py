@@ -131,6 +131,27 @@ def config_interface_for(bcd: int) -> int:
     return 2 if 0x40 <= bcd < 0x56 else 3
 
 
+def flash_write_blocked(info):
+    """Why a write to this board would not survive a power cycle, or None.
+
+    Confirmed on hardware: in Dinput the board takes all 65 messages, applies
+    them to RAM and acts on them straight away, then drops the commit. No
+    stall, no error, no short read - the config simply reverts on the next
+    power cycle. Only keyboard mode writes flash.
+    """
+    if info.vendor != VENDOR_2015 or info.product == PRODUCT_IPAC2:
+        return None
+    return (
+        "the board is in %s mode, where a write is applied but never "
+        "committed to flash - it takes effect immediately and then reverts on "
+        "the next power cycle.\n"
+        "Hold Start1+P1SW1 for 10s to switch to keyboard mode, write, then "
+        "switch back with Start1+P1SW2 (Dinput). The mode is not in the "
+        "config block, so switching back will not disturb what you wrote."
+        % info.mode
+    )
+
+
 # --------------------------------------------------------------------------
 # Pin table
 # --------------------------------------------------------------------------
@@ -1944,7 +1965,21 @@ def _print_device(dev: DeviceInfo):
 def cmd_dump(args) -> int:
     with open_board(args) as board:
         raw = board.read_config()
+        info = board.info
     profile = decode_config(raw)
+    # What a read returns depends on the mode the board is in, so a dump that
+    # does not say which mode it came from cannot be trusted later. A
+    # mislabelled Dinput capture is exactly how this repo ended up asserting
+    # that the two modes are byte-identical.
+    profile["capturedIn"] = info.mode
+    profile["capturedProduct"] = "%04x" % info.product
+    if flash_write_blocked(info):
+        print(
+            "WARNING: dumped in %s mode, where a read does not report the live "
+            "config.\n         Switch to keyboard mode (Start1+P1SW1, ten "
+            "seconds) for a dump you can trust." % info.mode,
+            file=sys.stderr,
+        )
 
     if args.raw:
         with open(args.raw, "wb") as fh:
@@ -1972,6 +2007,10 @@ def cmd_apply(args) -> int:
         if warning:
             print(warning, file=sys.stderr)
 
+        blocked = flash_write_blocked(board.info)
+        if blocked and args.dry_run:
+            print("WARNING: %s\n" % blocked, file=sys.stderr)
+
         if not changes:
             print("no change - the board already matches %s" % args.profile)
             return 0
@@ -1991,6 +2030,13 @@ def cmd_apply(args) -> int:
         if args.dry_run:
             print("\ndry run - nothing written")
             return 0
+
+        if blocked and not args.force:
+            print(
+                "error: %s\n       Pass --force to write anyway." % blocked,
+                file=sys.stderr,
+            )
+            return 2
 
         if not args.no_backup:
             path = write_backup(decode_config(current), backup_dir(args.backup_dir))
@@ -2042,13 +2088,22 @@ def cmd_restore(args) -> int:
             print("no change - the board already matches %s" % args.backup)
             return 0
         print("restoring %d byte%s" % (len(changes), "" if len(changes) == 1 else "s"))
+        blocked = flash_write_blocked(board.info)
         if args.dry_run:
             for change in changes:
                 print("  [%3d] %-18s %s -> %s" % (
                     change["offset"], change["meaning"],
                     _fmt_byte(change["before"]), _fmt_byte(change["after"])))
+            if blocked:
+                print("\nWARNING: %s" % blocked, file=sys.stderr)
             print("\ndry run - nothing written")
             return 0
+        if blocked and not args.force:
+            print(
+                "error: %s\n       Pass --force to write anyway." % blocked,
+                file=sys.stderr,
+            )
+            return 2
         if not args.no_backup:
             path = write_backup(decode_config(current), backup_dir(args.backup_dir))
             print("backed up current config to %s" % path)
@@ -2237,6 +2292,11 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--dry-run", action="store_true", help="show the diff, write nothing")
     p.add_argument("--no-backup", action="store_true")
     p.add_argument("--backup-dir")
+    p.add_argument(
+        "--force",
+        action="store_true",
+        help="write even in a mode where the board will not commit to flash",
+    )
     p.set_defaults(func=cmd_apply)
 
     p = sub.add_parser("restore", help="write a dump back byte for byte", parents=[common])
@@ -2244,6 +2304,11 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--dry-run", action="store_true")
     p.add_argument("--no-backup", action="store_true")
     p.add_argument("--backup-dir")
+    p.add_argument(
+        "--force",
+        action="store_true",
+        help="write even in a mode where the board will not commit to flash",
+    )
     p.set_defaults(func=cmd_restore)
 
     p = sub.add_parser("saved", help="list saved configs and presets", parents=[common])
@@ -2672,7 +2737,12 @@ def _make_handler(args):
                 current = board.read_config()
                 updated = bytes(encode_config(profile, current))
                 result = self._changes_result(board, current, updated, profile)
+                blocked = flash_write_blocked(board.info)
+                if blocked:
+                    result["flash_warning"] = blocked
                 if not dry_run and result["changes"]:
+                    if blocked and not payload.get("force"):
+                        raise ProtocolError(blocked)
                     result["backup"] = self._backup(current)
                     board.write_config(updated)
                     result["written"] = True
@@ -2717,7 +2787,12 @@ def _make_handler(args):
                 result = self._changes_result(board, current, updated, profile)
                 result["source"] = origin
                 result["notes"] = import_notes(profile, board.info)
+                blocked = flash_write_blocked(board.info)
+                if blocked:
+                    result["flash_warning"] = blocked
                 if not dry_run and result["changes"]:
+                    if blocked and not payload.get("force"):
+                        raise ProtocolError(blocked)
                     result["backup"] = self._backup(current)
                     board.write_config(updated)
                     result["written"] = True
@@ -2777,7 +2852,9 @@ PAGE = """<!doctype html>
   table { width: 100%; border-collapse: collapse; }
   td, th { padding: .3rem .4rem; text-align: left; border-bottom: 1px solid var(--line); }
   th { font-size: .8rem; color: var(--muted); font-weight: 600; }
-  td.pin { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; width: 6rem; }
+  td.pin { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; width: 11rem; }
+  td.pin .desc { font-family: ui-sans-serif, system-ui, -apple-system, "Segoe UI",
+                 sans-serif; font-size: .8rem; color: var(--muted); }
   select { font: inherit; width: 100%; max-width: 14rem; padding: .25rem;
            background: var(--panel); color: var(--ink);
            border: 1px solid var(--line); border-radius: 5px; }
@@ -2944,7 +3021,12 @@ function renderPins(changed) {
     for (const name of group.pins) {
       const pin = byName[name] || {};
       const mark = (field) => marked.has(`${name}.${field}`) ? ' class="changed"' : '';
-      html += `<tr><td class="pin">${esc(name)}</td>
+      // A profile may label a pin with what it means on the panel ("GP1 South
+      // (A / Cross)"). The board only knows the code, so the label sits beside
+      // the pin rather than replacing anything in the select.
+      const desc = pin.description
+        ? `<div class="desc">${esc(pin.description)}</div>` : '';
+      html += `<tr><td class="pin">${esc(name)}${desc}</td>
         <td><select${mark('action')} data-pin="${name}" data-field="action">${optionsHtml(pin.action || '')}</select></td>
         <td><select${mark('alternate_action')} data-pin="${name}" data-field="alternate_action">${optionsHtml(pin.alternate_action || '')}</select></td>
         <td><input${mark('shift')} type="checkbox" data-pin="${name}" data-field="shift" ${pin.shift ? 'checked' : ''}></td>
@@ -2962,6 +3044,11 @@ function collect() {
     const name = el.dataset.pin;
     pins[name] = pins[name] || { name };
     pins[name][el.dataset.field] = el.type === 'checkbox' ? el.checked : el.value;
+  }
+  // Descriptions have no form field of their own, so carry them across or a
+  // download - or a round trip through import - would drop them.
+  for (const pin of (PROFILE.pins || [])) {
+    if (pin.description && pins[pin.name]) pins[pin.name].description = pin.description;
   }
   return {
     schemaVersion: 2.0, resourceType: 'ipac2-pins', deviceClass: 'ipac2',
@@ -2988,6 +3075,12 @@ function renderChanges(result, target) {
   if (result.warning) {
     $(target).insertAdjacentHTML('afterbegin',
       `<div class="banner warn">${esc(result.warning)}</div>`);
+  }
+  // Dinput takes a write and never commits it. Say so before the button is
+  // pressed, not after the next power cycle has thrown the work away.
+  if (result.flash_warning) {
+    $(target).insertAdjacentHTML('afterbegin',
+      `<div class="banner warn">${esc(result.flash_warning)}</div>`);
   }
 }
 

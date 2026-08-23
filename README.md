@@ -163,7 +163,8 @@ two tools:
   "paclink": false,
   "pins": [
     {"name": "1sw1", "action": "CTRL L", "alternate_action": "ESC"},
-    {"name": "1start", "action": "1", "shift": true}
+    {"name": "1start", "action": "1", "shift": true},
+    {"name": "1sw2", "action": "GAMEPAD 2", "description": "GP1 East (B / Circle)"}
   ]
 }
 ```
@@ -175,8 +176,17 @@ equivalents. Actions are names from the code table — keys (`A`, `SPACE`,
 media keys — or `""` to unassign. `shift: true` makes that pin the shift key;
 `alternate_action` is what a pin sends while shift is held.
 
+`description` is an optional label. The board never sees it — the web UI shows
+it under the pin name, which is how `GAMEPAD 1` reads as *GP1 South (A /
+Cross)* in the Batocera preset without the code table having to carry
+Batocera's vocabulary. Descriptions survive loading a profile into the form and
+downloading it again.
+
 **A profile only changes the pins it names.** Everything else on the board is
-left exactly as it was.
+left exactly as it was — and within a named pin, only the fields it actually
+lists. A pin with a `description` but no `action` is therefore a pure label: it
+keeps whatever the board already had. That is how the gamepad preset annotates
+the sticks without claiming to know their encoding.
 
 ## Safety
 
@@ -206,17 +216,47 @@ This is the usual reason to reach for the tool, and it depends on firmware:
 
 `list` reports which you have. On 1.50+, the mode hotkeys are
 `Start1+P1SW1` keyboard, `Start1+P1SW2` Dinput, `Start1+P1SW3` Xinput. If a
-switch goes wrong, hold `P1SW1` while plugging in USB. Note the config
-interface is unavailable in Xinput mode — configure in keyboard or Dinput.
+switch goes wrong, hold `P1SW1` while plugging in USB.
+
+**Write in keyboard mode.** The config interface is not exposed at all in
+Xinput, and Dinput is worse than unavailable — it accepts a write, acts on it
+immediately, and never commits it to flash, so the board reverts on the next
+power cycle with no error anywhere. `apply` and `restore` refuse to write in
+any mode but keyboard; `--force` overrides. Switch to keyboard, write, then
+switch back — the mode is not in the config block, so switching back does not
+disturb what you wrote.
 
 **You probably do not need a gamepad profile at all.** On 1.50+ firmware,
 switching to Dinput makes the board present as two game controllers on its
 own; the pin-to-button mapping is internal and the config block is untouched.
 Switch mode, and Batocera sees controllers.
 
-`profiles/batocera-gamepad.template.json` remains only for the case where you
-want *custom* per-pin gamepad button assignments. It is unverified, and
-applying it is not part of the normal path.
+### Making Dinput actually work on Batocera
+
+Switching to Dinput on its own is often not enough: Batocera sees the pads but
+the joystick does nothing, which is a recurring complaint on the Batocera
+forums. The board's stock map puts the stick on four separate buttons, and
+EmulationStation will not accept those as a d-pad.
+
+Writing a profile fixes it. Put the four directions on `HAT 1` and the buttons
+on `GAMEPAD 1`..`n`, then:
+
+```sh
+# 1. keyboard mode - the only mode that commits to flash
+#    hold Start1+P1SW1 for ten seconds
+ipacconf.py apply profiles/your-gamepad.json
+# 2. hold Start1+P1SW2 for ten seconds -> Dinput
+```
+
+Batocera then detects the I-PAC pads and the joystick maps as up/down/left/
+right in the ES controller wizard. Confirmed on hardware.
+
+`profiles/batocera-gamepad.template.json` is the starting point. Use `monitor`
+to find which physical control is on which pin before editing it — the pin
+names are the board's, not the panel's.
+
+Note you cannot check your work with `dump` while in Dinput; it does not report
+the live config. Dump in keyboard mode, or judge by behaviour.
 
 If the firmware is keyboard-only and you'd rather not flash, Batocera's
 `keyboardToPads` (v41+) or `xarcade2jstick` (v40−) synthesize virtual gamepads
@@ -225,7 +265,9 @@ from a keyboard encoder — pair that with sensible keycodes written by this too
 ## Protocol
 
 Reads return 256 bytes; writes send 260 (`IPACSERIES_SIZE`), the last four
-being zero padding — a short write is silently discarded.
+being zero padding — a short write is silently discarded. A full write is
+committed to flash **only in keyboard mode**; in Dinput it reaches RAM and
+goes no further.
 2015+ boards take the config as 4-byte chunks inside HID **output**
 reports (report id 3) — `HIDIOCSOUTPUT` on the hidraw node for the config
 interface. Ultimarc's `wValue` of `0x0203` is `(report_type << 8) | report_id`,
@@ -247,9 +289,39 @@ USB product id**, and switching with `Start1+P1SW2` re-enumerates it:
 | `d209:0420` | keyboard | 3 |
 | `d209:0421` | Dinput game controller | 4 |
 
-Confirmed by dumping a real board in both modes: the two configs are
-**byte-identical**, keycodes and all. In Dinput the board maps pins to gamepad
-buttons internally and simply ignores the key assignments.
+**A read returns different bytes in each mode, and the Dinput read is the
+one to distrust.** Dumping in Dinput returns what looks like a stock internal
+map — joystick directions as GAMEPAD 10-13, the P2 side on ANALOG 1-5 —
+regardless of what is actually in flash. Switch back to keyboard and the real
+config is there, untouched.
+
+**The board's behaviour follows flash, not that read.** Confirmed on hardware:
+a profile written in keyboard mode is what the board acts on once switched to
+Dinput. So per-pin gamepad assignments *do* work — you just cannot verify them
+by dumping in Dinput.
+
+**Not an interface-selection problem.** Checked on hardware: with the board in
+Dinput, exactly one of seven hidraw nodes answers a config read at all, and it
+is the one that returns the stale map. There is no other node holding the live
+config, so `open_board` picking the wrong interface is ruled out.
+
+What the Dinput read returns is the config as it was *before* the last
+keyboard-mode write — not a generic factory default. Why the board serves that
+while acting on something else is unknown; the mechanism is undocumented in
+both open-source implementations, and settling it means capturing WinIPAC over
+USB (see the bootloader notes below for the same problem).
+
+Practically it does not matter: dump in keyboard mode, judge Dinput by
+behaviour. `dump` warns when it is reading in a mode where the answer is not
+live.
+
+`fixtures/ipac2-1.55-dinput.json` is byte-identical to the keyboard fixture
+beside it, which is what the earlier "the two modes are byte-identical" claim
+rested on. It is almost certainly a keyboard capture that was mislabelled — the
+hotkey needs a full ten-second hold — and it records no product id, so there is
+no way to tell from the file. `dump` now writes `capturedIn` and
+`capturedProduct` for exactly this reason; both fixtures predate that and
+should be recaptured before being trusted.
 
 Switching is done by holding buttons — `Start1+P1SW1` keyboard, `+P1SW2`
 Dinput, `+P1SW3` Xinput, ten seconds each. WinIPAC can also switch in software
@@ -262,8 +334,21 @@ another `0x5x` header beside `0x50` (write) and `0x59` (read).
 cannot be reconfigured or mode-switched over USB while in Xinput, so the way
 back is the `Start1+P1SW1` hotkey or holding P1SW1 while plugging in USB.
 
-This is why a keyboard-mode dump and a Dinput-mode dump are **byte-identical**
-— the mode is not in the 256-byte config at all. `list` reports it from the
+**Switching modes does not destroy the config.** Confirmed on hardware:
+write a custom map in keyboard mode, switch to Dinput (the dump changes to the
+board's internal map), switch back — the custom map is still there, byte for
+byte. Flash survives the round trip; only what a read *reports* changes.
+
+**Dinput accepts writes it will not keep.** Confirmed on hardware: in Dinput
+the board takes all 65 messages, applies them to RAM and acts on them straight
+away — the panel behaves exactly as the new profile says — and then drops the
+flash commit. No stall, no error, no short read. Unplug the board and the old
+config is back. The same write in keyboard mode persists across a cold power
+cycle. This is invisible to any check that only reads the config back, because
+a read returns what is in RAM; the only test that distinguishes the two is
+*unplug the board and dump again*.
+
+The mode itself is not in the 256-byte config — `list` reports it from the
 descriptor. Xinput presumably has its own id; unverified.
 
 Because Dinput adds a fourth interface, the `bcdDevice` rule from
@@ -333,11 +418,27 @@ factory MAME layout, re-encodes byte-for-byte identically, and a single-field
 change moves exactly one byte — so the pin table, the code table, the
 transport and the read-modify-write model are all confirmed against hardware.
 
-Writing is confirmed too: a one-byte change applied to a real board, and a
-re-dump showed it had stuck. Read, write, diff, backup and restore have all
-now run against hardware.
+Writing is confirmed too, and now confirmed *persistent*: a one-byte change
+applied to a real board in keyboard mode survived unplugging the board and
+plugging it back in. Read, write, diff, backup and restore have all now run
+against hardware.
 
-Five bugs the hardware found, all fixed:
+The earlier "a re-dump showed it had stuck" was not enough evidence — a re-dump
+reads RAM, and the board had been in Dinput, where writes never reach flash.
+Verify a write by **power-cycling the board**, not by reading it back.
+
+Two hardware findings that changed the model, not just the code:
+
+- **Dinput never commits a write to flash.** It applies to RAM, acts on it
+  immediately, and reverts on the next power cycle, silently. Write in
+  keyboard mode.
+- **A dump taken in Dinput does not report the live config**, but the board
+  still acts on it. Writing `HAT 1` on the four directions in keyboard mode is
+  what makes Batocera accept the stick as a d-pad in Dinput — the fix for a
+  well-known "Batocera sees the I-PAC pads but the joystick does nothing"
+  complaint. Verify by behaviour, or by dumping in keyboard mode.
+
+Six bugs the hardware found, all fixed:
 
 1. The config goes out as an **output** report, not a feature report.
    Ultimarc's `wValue` 0x0203 is type 2 (Output); reading it as Feature made
@@ -352,6 +453,11 @@ Five bugs the hardware found, all fixed:
 5. A write is **260 bytes, not 256** — four longer than a read response, so 65
    messages rather than 64. The board accepts a short write message by message
    and then discards it, committing nothing: no error, no change.
+6. **Dinput mode accepts writes and never flashes them.** This one hid behind
+   (5): sending 260 bytes made the config take effect, which read as "fixed",
+   but taking effect is a RAM write. The flash commit was still failing, and
+   nothing distinguishes the two until the board is power-cycled. Write in
+   keyboard mode.
 
 The input monitor has **not** been run against the board yet. Everything it
 does off-hardware works — the keycode table round-trips, a scripted panel walk

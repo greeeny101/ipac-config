@@ -8,6 +8,7 @@ import json
 import os
 import struct
 import tempfile
+import types
 import unittest
 
 import ipacconf as ic
@@ -528,6 +529,69 @@ class TestModeDetection(unittest.TestCase):
         self.assertEqual(self._info(0x0421).as_dict()["mode"], "Dinput game controller")
 
 
+class TestFlashWriteBlocked(unittest.TestCase):
+    """Only keyboard mode commits a write to flash - confirmed on hardware.
+
+    In Dinput the board takes all 65 messages, acts on them immediately and
+    then drops the commit, so the config reverts on the next power cycle with
+    nothing anywhere reporting a failure.
+    """
+
+    @staticmethod
+    def _info(product):
+        return ic.DeviceInfo("/dev/hidraw0", ic.VENDOR_2015, product, 0x0055, 2, "1-1")
+
+    def test_keyboard_mode_commits(self):
+        self.assertIsNone(ic.flash_write_blocked(self._info(ic.PRODUCT_IPAC2)))
+
+    def test_dinput_does_not_commit(self):
+        reason = ic.flash_write_blocked(self._info(0x0421))
+        self.assertIsNotNone(reason)
+        self.assertIn("Dinput", reason)
+
+    def test_the_reason_says_how_to_get_out_of_it(self):
+        reason = ic.flash_write_blocked(self._info(0x0421))
+        self.assertIn("Start1+P1SW1", reason)
+
+    def test_an_unknown_mode_is_treated_as_unsafe(self):
+        self.assertIsNotNone(ic.flash_write_blocked(self._info(0x0422)))
+
+    def test_a_pre_2015_board_is_not_second_guessed(self):
+        info = ic.DeviceInfo("/dev/hidraw0", ic.VENDOR_PRE2015,
+                             ic.PRODUCT_PRE2015, 0x0100, 2, "1-1")
+        self.assertIsNone(ic.flash_write_blocked(info))
+
+
+class TestDumpRecordsMode(unittest.TestCase):
+    """A read returns different bytes per mode, so a dump must say which one.
+
+    fixtures/ipac2-1.55-dinput.json has no mode recorded and is byte-identical
+    to the keyboard fixture, which is how a mislabelled capture became a wrong
+    claim in the README.
+    """
+
+    def test_dump_records_the_mode_it_was_taken_in(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            board = os.path.join(tmp, "board.json")
+            out = os.path.join(tmp, "dump.json")
+            args = types.SimpleNamespace(
+                fake_device=board, device=None, output=out, raw=None)
+            ic.cmd_dump(args)
+            with open(out) as fh:
+                dumped = json.load(fh)
+        self.assertEqual(dumped["capturedIn"], "keyboard")
+        self.assertEqual(dumped["capturedProduct"], "0420")
+
+    def test_the_extra_fields_do_not_break_loading_it_back(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            board = os.path.join(tmp, "board.json")
+            out = os.path.join(tmp, "dump.json")
+            ic.cmd_dump(types.SimpleNamespace(
+                fake_device=board, device=None, output=out, raw=None))
+            profile = ic.load_profile(out)
+            self.assertEqual(len(ic.raw_from_profile(profile, out)), ic.CONFIG_SIZE)
+
+
 class TestConfigCandidates(unittest.TestCase):
     """Dinput mode adds a fourth interface, so the firmware rule is a guess."""
 
@@ -590,6 +654,26 @@ class TestProfilesOnDisk(unittest.TestCase):
                 profile = ic.load_profile(os.path.join(directory, name))
                 raw = ic.encode_config(profile, ic.default_config())
                 self.assertEqual(len(raw), ic.CONFIG_SIZE)
+
+    def test_a_description_is_a_label_and_nothing_else(self):
+        """It must never reach the board or shift a byte."""
+        plain = ic.encode_config(
+            {"pins": [{"name": "1sw1", "action": "GAMEPAD 1"}]},
+            ic.default_config())
+        labelled = ic.encode_config(
+            {"pins": [{"name": "1sw1", "action": "GAMEPAD 1",
+                       "description": "GP1 South (A / Cross)"}]},
+            ic.default_config())
+        self.assertEqual(bytes(plain), bytes(labelled))
+
+    def test_a_described_pin_with_no_action_keeps_what_the_board_had(self):
+        """The gamepad template labels the sticks without assigning them."""
+        base = ic.default_config()
+        before = {p["name"]: p for p in ic.decode_config(base)["pins"]}
+        after = ic.decode_config(bytes(ic.encode_config(
+            {"pins": [{"name": "1up", "description": "GP1 Hat0 Up"}]}, base)))
+        self.assertEqual({p["name"]: p for p in after["pins"]}["1up"],
+                         before["1up"])
 
     def test_restore_rejects_an_edited_profile(self):
         with tempfile.NamedTemporaryFile("w", suffix=".json", delete=False) as fh:
@@ -847,6 +931,15 @@ class TestMergeProfile(unittest.TestCase):
         self.assertEqual(changed,
                          [{"pin": "1b", "field": "alternate_action",
                            "before": "", "after": "F1"}])
+
+    def test_a_description_survives_the_merge_without_counting_as_a_change(self):
+        base = {"pins": [{"name": "1sw1", "action": "GAMEPAD 1"}]}
+        incoming = {"pins": [{"name": "1sw1", "action": "GAMEPAD 1",
+                              "description": "GP1 South (A / Cross)"}]}
+        merged = ic.merge_profile(base, incoming)
+        self.assertEqual(merged["pins"][0]["description"],
+                         "GP1 South (A / Cross)")
+        self.assertEqual(ic.profile_changes(base, merged), [])
 
     def test_a_pin_the_base_never_had_is_added(self):
         base = {"pins": [{"name": "1up", "action": "UP"}]}
