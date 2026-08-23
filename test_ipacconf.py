@@ -6,6 +6,7 @@
 
 import json
 import os
+import shutil
 import struct
 import tempfile
 import types
@@ -1375,6 +1376,233 @@ class TestMonitorLine(unittest.TestCase):
         self.assertIn("hiding the rest", line)
         self.assertNotIn("hiding the rest", self.line(
             kind="other", raw=4, name=None, code=None))
+
+
+class TestXinputIdentity(unittest.TestCase):
+    """In Xinput mode the board answers to 045e:028e - a Microsoft Xbox 360
+    pad's ids, shared with the genuine pad and every clone of it. The only
+    thing that still says Ultimarc is the usb string descriptors, so they are
+    what decides, and a real controller must never be taken for a board."""
+
+    @staticmethod
+    def _info(vendor, product, manufacturer=None, product_name=None):
+        return ic.DeviceInfo("/dev/hidraw0", vendor, product, 0x0055, 2, "1-1",
+                             manufacturer=manufacturer,
+                             product_name=product_name)
+
+    def test_ultimarc_strings_make_it_our_board(self):
+        info = self._info(ic.VENDOR_XINPUT, ic.PRODUCT_XINPUT,
+                          "Ultimarc", "I-PAC 2")
+        self.assertTrue(info.is_ipac2)
+        self.assertIn("Xinput", info.mode)
+
+    def test_a_genuine_xbox_pad_is_not_our_board(self):
+        info = self._info(ic.VENDOR_XINPUT, ic.PRODUCT_XINPUT,
+                          "Microsoft", "Controller")
+        self.assertFalse(info.is_ipac2)
+        self.assertNotIn("Xinput", info.mode)
+
+    def test_missing_strings_are_not_enough(self):
+        """A device that reports no strings at all stays unidentified: the
+        borrowed ids alone can never be the evidence."""
+        self.assertFalse(self._info(ic.VENDOR_XINPUT, ic.PRODUCT_XINPUT).is_ipac2)
+
+    def test_the_ultimarc_ids_need_no_strings(self):
+        """d209 is Ultimarc's own; nothing else answers to it."""
+        self.assertTrue(self._info(ic.VENDOR_2015, ic.PRODUCT_IPAC2).is_ipac2)
+
+    def test_only_the_borrowed_identity_is_flagged_as_disguised(self):
+        self.assertTrue(self._info(ic.VENDOR_XINPUT, ic.PRODUCT_XINPUT,
+                                   "Ultimarc", "I-PAC 2").disguised)
+        self.assertFalse(self._info(ic.VENDOR_2015, ic.PRODUCT_IPAC2).disguised)
+
+    def test_xinput_writes_are_not_trusted_to_flash(self):
+        reason = ic.flash_write_blocked(
+            self._info(ic.VENDOR_XINPUT, ic.PRODUCT_XINPUT, "Ultimarc", "I-PAC 2"))
+        self.assertIsNotNone(reason)
+        self.assertIn("Start1+P1SW1", reason)
+
+    def test_a_genuine_xbox_pad_is_never_offered_a_write(self):
+        """Not a real scenario - discovery drops it first - but if one ever
+        reached here, warning is the only safe answer."""
+        self.assertIsNotNone(ic.flash_write_blocked(
+            self._info(ic.VENDOR_XINPUT, ic.PRODUCT_XINPUT, "Microsoft", "Controller")))
+
+
+class TestFindDevicesAcrossModes(unittest.TestCase):
+    """Discovery against a fake /sys tree. This is the path that failed
+    outright in Xinput mode: the vendor filter dropped the board before
+    anything else got a chance to look at it."""
+
+    def setUp(self):
+        self.root = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, self.root, True)
+        self.next_node = 0
+
+    def _add(self, vendor, product, manufacturer, product_name,
+             interface=2, bcd="0055"):
+        """Build one hidraw node hanging off a usb device, as sysfs lays it
+        out: hidraw/device -> .../<usb>/<interface>/<hid>."""
+        node = "hidraw%d" % self.next_node
+        self.next_node += 1
+        usb_dir = os.path.join(self.root, "devices", "usb-%s" % node)
+        iface_dir = os.path.join(usb_dir, "1-1:1.%d" % interface)
+        hid_dir = os.path.join(iface_dir, "0003:%04X:%04X.0001" % (vendor, product))
+        os.makedirs(hid_dir)
+        for name, value in (("idVendor", "%04x" % vendor),
+                            ("idProduct", "%04x" % product),
+                            ("bcdDevice", bcd),
+                            ("manufacturer", manufacturer),
+                            ("product", product_name)):
+            if value is None:
+                continue
+            with open(os.path.join(usb_dir, name), "w") as fh:
+                fh.write(value + "\n")
+        with open(os.path.join(iface_dir, "bInterfaceNumber"), "w") as fh:
+            fh.write("%02d\n" % interface)
+
+        link_dir = os.path.join(self.root, "class", "hidraw", node)
+        os.makedirs(link_dir)
+        os.symlink(hid_dir, os.path.join(link_dir, "device"))
+        return node
+
+    def find(self, **kwargs):
+        return ic.find_devices(sys_root=self.root, **kwargs)
+
+    def test_keyboard_mode_is_found(self):
+        self._add(ic.VENDOR_2015, ic.PRODUCT_IPAC2, "Ultimarc", "I-PAC 2")
+        found = self.find()
+        self.assertEqual([d.mode for d in found], ["keyboard"])
+
+    def test_xinput_mode_is_found(self):
+        self._add(ic.VENDOR_XINPUT, ic.PRODUCT_XINPUT, "Ultimarc", "I-PAC 2")
+        found = self.find()
+        self.assertEqual(len(found), 1)
+        self.assertIn("Xinput", found[0].mode)
+        self.assertTrue(found[0].disguised)
+
+    def test_a_genuine_xbox_pad_is_not_returned(self):
+        self._add(ic.VENDOR_XINPUT, ic.PRODUCT_XINPUT, "Microsoft",
+                  "Controller")
+        self.assertEqual(self.find(), [])
+        # Not even as an unsupported board: it must never become a candidate
+        # for a config probe, which is what include_unsupported feeds.
+        self.assertEqual(self.find(include_unsupported=True), [])
+
+    def test_the_board_is_picked_out_from_beside_a_real_pad(self):
+        self._add(ic.VENDOR_XINPUT, ic.PRODUCT_XINPUT, "Microsoft", "Controller")
+        self._add(ic.VENDOR_XINPUT, ic.PRODUCT_XINPUT, "Ultimarc", "I-PAC 2")
+        found = self.find()
+        self.assertEqual(len(found), 1)
+        self.assertEqual(found[0].path, "/dev/hidraw1")
+
+    def test_a_pre_2015_board_is_still_recognised_as_unsupported(self):
+        self._add(ic.VENDOR_PRE2015, ic.PRODUCT_PRE2015, "Ultimarc", "I-PAC")
+        self.assertEqual(self.find(), [])
+        self.assertEqual(len(self.find(include_unsupported=True)), 1)
+
+    def test_the_borrowed_firmware_version_is_not_reported_as_the_boards(self):
+        """bcdDevice is borrowed along with the ids: in Xinput the board
+        reports 1.00, which is the Xbox pad's. Printing that as firmware sends
+        someone hunting a firmware fault that does not exist."""
+        self._add(ic.VENDOR_XINPUT, ic.PRODUCT_XINPUT, "Ultimarc", "I-PAC 2",
+                  bcd="0100")
+        found = self.find()[0]
+        self.assertIn("not reported in Xinput", found.firmware_summary)
+        self.assertIn("1.50+", found.firmware_summary)
+        self.assertNotIn("unrecognised", found.firmware_summary)
+
+    def test_a_board_in_xinput_is_a_gamepad_whatever_bcddevice_says(self):
+        """1.00 fails the bcdDevice gamepad rule, yet the board is acting as a
+        gamepad right now - the rule cannot apply to a borrowed version."""
+        self.assertFalse(ic.firmware_supports_gamepad(0x00))
+        self._add(ic.VENDOR_XINPUT, ic.PRODUCT_XINPUT, "Ultimarc", "I-PAC 2",
+                  bcd="0100")
+        self.assertTrue(self.find()[0].supports_gamepad)
+
+    def test_a_real_version_is_still_reported_in_keyboard_mode(self):
+        self._add(ic.VENDOR_2015, ic.PRODUCT_IPAC2, "Ultimarc", "I-PAC 2",
+                  bcd="0155")
+        summary = self.find()[0].firmware_summary
+        self.assertIn("1.55", summary)
+        self.assertNotIn("not reported", summary)
+
+    def test_the_strings_are_carried_through(self):
+        self._add(ic.VENDOR_XINPUT, ic.PRODUCT_XINPUT, "Ultimarc", "I-PAC 2")
+        found = self.find()[0]
+        self.assertEqual(found.manufacturer, "Ultimarc")
+        self.assertEqual(found.product_name, "I-PAC 2")
+
+
+class TestBoardOnTheBusWithNoHidNode(unittest.TestCase):
+    """In Xinput the board is bound by xpad and may expose no hid interface at
+    all, so it never appears in the hidraw scan. It is still plugged in, and
+    saying "no board found" sends someone hunting a cable fault."""
+
+    def setUp(self):
+        self.root = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, self.root, True)
+        self.devices = os.path.join(self.root, "bus", "usb", "devices")
+        os.makedirs(self.devices)
+
+    def _add(self, name, vendor, product, manufacturer, product_name):
+        usb_dir = os.path.join(self.devices, name)
+        os.makedirs(usb_dir)
+        for key, value in (("idVendor", "%04x" % vendor),
+                           ("idProduct", "%04x" % product),
+                           ("bcdDevice", "0155"),
+                           ("manufacturer", manufacturer),
+                           ("product", product_name)):
+            if value is None:
+                continue
+            with open(os.path.join(usb_dir, key), "w") as fh:
+                fh.write(value + "\n")
+        return usb_dir
+
+    def find(self):
+        return ic.find_usb_boards(sys_root=self.root)
+
+    def test_an_xinput_board_is_found_on_the_bus(self):
+        self._add("1-1", ic.VENDOR_XINPUT, ic.PRODUCT_XINPUT,
+                  "Ultimarc", "I-PAC 2")
+        found = self.find()
+        self.assertEqual(len(found), 1)
+        self.assertIn("Xinput", found[0].mode)
+        self.assertIsNone(found[0].path)  # no config node to point at
+
+    def test_a_genuine_xbox_pad_is_not_found_on_the_bus_either(self):
+        self._add("1-1", ic.VENDOR_XINPUT, ic.PRODUCT_XINPUT,
+                  "Microsoft", "Controller")
+        self.assertEqual(self.find(), [])
+
+    def test_interface_directories_are_skipped(self):
+        """1-1:1.0 sits beside 1-1 and carries no idVendor; a board must not
+        be counted once per interface."""
+        self._add("1-1", ic.VENDOR_XINPUT, ic.PRODUCT_XINPUT,
+                  "Ultimarc", "I-PAC 2")
+        iface = os.path.join(self.devices, "1-1:1.0")
+        os.makedirs(iface)
+        for key, value in (("idVendor", "045e"), ("idProduct", "028e"),
+                           ("manufacturer", "Ultimarc"), ("product", "I-PAC 2")):
+            with open(os.path.join(iface, key), "w") as fh:
+                fh.write(value + "\n")
+        self.assertEqual(len(self.find()), 1)
+
+    def test_the_reason_names_xinput_and_the_way_out(self):
+        self._add("1-1", ic.VENDOR_XINPUT, ic.PRODUCT_XINPUT,
+                  "Ultimarc", "I-PAC 2")
+        reason = ic.no_config_node_reason(self.find())
+        self.assertIn("Xinput", reason)
+        self.assertIn("Start1+P1SW1", reason)
+        self.assertNotIn("cable", reason)
+
+    def test_a_keyboard_mode_board_with_no_node_is_a_driver_problem(self):
+        """Same symptom, completely different cause - keyboard mode does
+        expose a hid interface, so a missing node means nothing bound it."""
+        self._add("1-1", ic.VENDOR_2015, ic.PRODUCT_IPAC2, "Ultimarc", "I-PAC 2")
+        reason = ic.no_config_node_reason(self.find())
+        self.assertIn("usbhid", reason)
+        self.assertNotIn("Start1+P1SW1", reason)
 
 
 if __name__ == "__main__":

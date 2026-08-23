@@ -218,10 +218,10 @@ This is the usual reason to reach for the tool, and it depends on firmware:
 `Start1+P1SW1` keyboard, `Start1+P1SW2` Dinput, `Start1+P1SW3` Xinput. If a
 switch goes wrong, hold `P1SW1` while plugging in USB.
 
-**Write in keyboard mode.** The config interface is not exposed at all in
-Xinput, and Dinput is worse than unavailable — it accepts a write, acts on it
-immediately, and never commits it to flash, so the board reverts on the next
-power cycle with no error anywhere. `apply` and `restore` refuse to write in
+**Write in keyboard mode.** Dinput accepts a write, acts on it immediately,
+and never commits it to flash, so the board reverts on the next power cycle
+with no error anywhere. Xinput cannot be written at all — it exposes no hid
+interface, so the question of whether the write would stick never arises. `apply` and `restore` refuse to write in
 any mode but keyboard; `--force` overrides. Switch to keyboard, write, then
 switch back — the mode is not in the config block, so switching back does not
 disturb what you wrote.
@@ -330,9 +330,63 @@ not in either open-source implementation and we have not captured it. Since
 the mode is not in the config block, it must be a separate message — likely
 another `0x5x` header beside `0x50` (write) and `0x59` (read).
 
-**Xinput is a one-way door for this tool**: Ultimarc document that the board
-cannot be reconfigured or mode-switched over USB while in Xinput, so the way
-back is the `Start1+P1SW1` hotkey or holding P1SW1 while plugging in USB.
+**Xinput hides the board behind an Xbox pad's identity.** Confirmed on
+hardware: in Xinput the board does not enumerate as Ultimarc at all — it
+reports `045e:028e`, a wired Microsoft Xbox 360 Controller, which is what gets
+the `xpad` driver to bind to it. Every Ultimarc id disappears from `lsusb`.
+That is why the tool used to say "no Ultimarc board found" here: discovery
+filtered on the vendor id and the board no longer had one.
+
+It is now found by its **string descriptors**, which it keeps while wearing
+the borrowed ids — it still reports `Ultimarc` / `I-PAC 2`, visible in
+`/dev/input/by-id` as `usb-Ultimarc_I-PAC_2-*`. This matters for safety as
+much as for detection: `045e:028e` is the genuine Microsoft pad's id, shared
+with thousands of clones, so it can never identify a board on its own. A
+device answering to it is only ever treated as a board when the strings agree,
+and one that does not match is dropped from discovery entirely rather than
+becoming a candidate for a config probe. `list` labels the board `identity
+borrowed from an Xbox 360 pad` so the Microsoft ids do not read as the tool
+having found the wrong device.
+
+Whether the **config interface** is reachable in Xinput is a separate question
+from whether the board is *found*, and the answer appears to be no: on
+hardware the board in Xinput produces no `/dev/hidraw` node at all, matching
+what Ultimarc document. `xpad` binds it, `usbhid` does not, so there is
+nothing to send the config protocol to — no amount of probing reaches it.
+
+That makes finding the board on the **usb bus** the point, rather than a
+consolation prize. Discovery scans `/sys/bus/usb/devices` as well as the
+hidraw nodes, so `list` reports the board, its mode and its firmware with
+`(no hid node)` where the config node would be, and then says why there is no
+config node and how to get one back. The three cases are kept distinct,
+because they have three different fixes:
+
+| What is true | What the tool says |
+|---|---|
+| Board in Xinput, no hid node | It is in Xinput; the config interface does not exist there; switch with `Start1+P1SW1` |
+| Board on the bus, hid node missing in a mode that should have one | Nothing bound `usbhid` — check `lsusb -t` |
+| Nothing matching on the bus | Cable, port or power |
+
+If the board is ever seen exposing a hid node in Xinput, nothing needs
+changing to take advantage of it: it would be discovered and probed like any
+other interface, and only the message above would become wrong.
+
+**The borrowed identity includes `bcdDevice`.** Confirmed on hardware: in
+Xinput the board reports version 1.00, which is the Xbox pad's, not its own —
+so the firmware version and the `bcdDevice`-based gamepad rule are both
+meaningless in this mode. `list` says so rather than printing 1.00 as the
+board's firmware, which reads as an unrecognised-firmware fault that is not
+there. What survives is the floor: mode switching exists only on 1.50+, so a
+board that reached Xinput at all is at least that, and it is self-evidently a
+gamepad while it is one.
+
+Two joystick nodes appear in Xinput (`if00` and `if01` — one per player), and
+no keyboard node. The input monitor follows the board there, so panel-watching
+works in Xinput; note that `xpad` numbers buttons from `BTN_SOUTH` rather than
+`BTN_TRIGGER`, so gamepad button *names* in the monitor are offset in this
+mode. Every event carries its raw code, so the offset is visible rather than
+silent — mapping it properly needs a capture of the board's Xinput button
+order, which we do not have.
 
 **Switching modes does not destroy the config.** Confirmed on hardware:
 write a custom map in keyboard mode, switch to Dinput (the dump changes to the
@@ -349,7 +403,9 @@ a read returns what is in RAM; the only test that distinguishes the two is
 *unplug the board and dump again*.
 
 The mode itself is not in the 256-byte config — `list` reports it from the
-descriptor. Xinput presumably has its own id; unverified.
+descriptor. Keyboard is `d209:0420`, Dinput `d209:0421`, and Xinput
+`045e:028e`; because Xinput changes the *vendor* too, the mode table is keyed
+on the vendor/product pair rather than on the product id alone.
 
 Because Dinput adds a fourth interface, the `bcdDevice` rule from
 Ultimarc-linux (which predates mode switching) is treated as a first guess
@@ -408,8 +464,9 @@ either open-source implementation. Get it by capturing WinIPAC doing *File →
 Force Board Reconfiguration* — switch to Dinput and back to keyboard in one
 recording, so both directions can be diffed against each other. Look for a
 `SET_REPORT` whose header byte is neither `0x50` (write) nor `0x59` (read).
-Gate any Xinput switch behind a confirmation: the board cannot be reached over
-USB in that mode, so it is the one switch the tool cannot undo.
+Gate any Xinput switch behind a confirmation until a config read is confirmed
+to work in Xinput: if it does not, that is the one switch the tool cannot
+undo.
 
 ## Status
 

@@ -49,14 +49,49 @@ PRODUCT_IPAC2 = 0x0420
 VENDOR_PRE2015 = 0xD208
 PRODUCT_PRE2015 = 0x0310
 
-# Multi-mode firmware (1.50+) reports the board's current mode in its product
-# id: switching with Start1+P1SW2 re-enumerates it as a different device. This
-# is why a keyboard-mode config and a Dinput-mode config read back identical -
-# the mode is not in the config block at all.
+# In Xinput mode the board stops advertising itself as Ultimarc at all: it
+# borrows a wired Xbox 360 pad's vendor and product ids, which is the only way
+# the xpad driver will bind to it. Confirmed on hardware - the board appears as
+# 045e:028e and every Ultimarc id disappears from lsusb.
+VENDOR_XINPUT = 0x045E
+PRODUCT_XINPUT = 0x028E
+
+# Multi-mode firmware (1.50+) reports the board's current mode in its usb ids:
+# switching with Start1+P1SW2 re-enumerates it as a different device. This is
+# why a keyboard-mode config and a Dinput-mode config read back identical - the
+# mode is not in the config block at all. Xinput changes the vendor too, so
+# these are keyed on the pair rather than on the product id alone.
 IPAC2_MODES = {
-    0x0420: "keyboard",
-    0x0421: "Dinput game controller",
+    (VENDOR_2015, 0x0420): "keyboard",
+    (VENDOR_2015, 0x0421): "Dinput game controller",
+    (VENDOR_XINPUT, PRODUCT_XINPUT): "Xinput game controller",
 }
+
+MODE_KEYBOARD = "keyboard"
+
+
+def looks_ultimarc(manufacturer, product_name) -> bool:
+    """True if the USB strings name a board that is hiding behind other ids.
+
+    045e:028e is the genuine Microsoft Xbox 360 Controller id, shared with
+    thousands of clones, so it can never identify a board on its own. What
+    does is that the board keeps its own string descriptors while wearing it:
+    confirmed on hardware, it still reports Ultimarc / I-PAC 2 in Xinput mode,
+    where a real pad reports Microsoft / Controller. Nothing is sent to a
+    045e:028e device unless these strings match.
+    """
+    text = ("%s %s" % (manufacturer or "", product_name or "")).lower()
+    return "ultimarc" in text or "i-pac" in text or "ipac" in text
+
+
+def board_mode(vendor, product, manufacturer=None, product_name=None):
+    """Which mode this usb identity means, or None if it is not our board."""
+    mode = IPAC2_MODES.get((vendor, product))
+    if mode is None:
+        return None
+    if vendor == VENDOR_XINPUT and not looks_ultimarc(manufacturer, product_name):
+        return None  # somebody's actual Xbox controller
+    return mode
 
 # Other 2015+ boards share this protocol but have different pin tables; we
 # recognise them only to give a clear "not supported" message.
@@ -139,8 +174,29 @@ def flash_write_blocked(info):
     stall, no error, no short read - the config simply reverts on the next
     power cycle. Only keyboard mode writes flash.
     """
-    if info.vendor != VENDOR_2015 or info.product == PRODUCT_IPAC2:
+    # A pre-2015 board speaks a different protocol and is refused long before
+    # a write; this has nothing to say about it. Of the boards it does cover,
+    # only a mode positively known to be keyboard is safe - Dinput, Xinput and
+    # any product id no version of this tool has seen all warn.
+    if info.vendor not in (VENDOR_2015, VENDOR_XINPUT):
         return None
+    if info.mode == MODE_KEYBOARD:
+        return None
+    if info.vendor == VENDOR_XINPUT:
+        # Not separately confirmed on hardware: Xinput is assumed to behave
+        # like Dinput because it is the same non-keyboard case in the same
+        # firmware, and the safe assumption is the one that warns. If a write
+        # here does survive a power cycle, this is the note to delete.
+        return (
+            "the board is in %s mode. Dinput is confirmed to apply a write "
+            "and then drop the flash commit, and Xinput is assumed to do the "
+            "same - so treat what you write here as lasting only until the "
+            "next power cycle.\n"
+            "Hold Start1+P1SW1 for 10s to switch to keyboard mode, write, "
+            "then switch back with Start1+P1SW3 (Xinput). The mode is not in "
+            "the config block, so switching back will not disturb what you "
+            "wrote." % info.mode
+        )
     return (
         "the board is in %s mode, where a write is applied but never "
         "committed to flash - it takes effect immediately and then reverts on "
@@ -608,18 +664,25 @@ def _iow(type_char: str, nr: int, size: int) -> int:
 
 
 class DeviceInfo:
-    def __init__(self, path, vendor, product, bcd, interface, usb_path):
+    def __init__(self, path, vendor, product, bcd, interface, usb_path,
+                 manufacturer=None, product_name=None):
         self.path = path
         self.vendor = vendor
         self.product = product
         self.bcd = bcd
         self.interface = interface
         self.usb_path = usb_path
+        # The usb string descriptors. In Xinput mode they are the only thing
+        # that still says Ultimarc, so they are what identifies the board.
+        self.manufacturer = manufacturer
+        self.product_name = product_name
 
     @property
     def name(self):
         if self.vendor == VENDOR_2015:
             return KNOWN_2015_PRODUCTS.get(self.product, "unknown Ultimarc board")
+        if self.vendor == VENDOR_XINPUT:
+            return "I-PAC 2" if self.is_ipac2 else "Xbox 360 controller (not a board)"
         if self.vendor == VENDOR_PRE2015 and self.product == PRODUCT_PRE2015:
             return "pre-2015 I-PAC (unsupported)"
         return "unknown"
@@ -630,14 +693,46 @@ class DeviceInfo:
 
     @property
     def mode(self):
-        """Which mode the board is in - it is encoded in the product id."""
-        if self.vendor != VENDOR_2015:
-            return "unknown"
-        return IPAC2_MODES.get(self.product, "unknown (product %04x)" % self.product)
+        """Which mode the board is in - it is encoded in its usb identity."""
+        mode = board_mode(self.vendor, self.product,
+                          self.manufacturer, self.product_name)
+        if mode is None:
+            return "unknown (%04x:%04x)" % (self.vendor, self.product)
+        return mode
 
     @property
     def is_ipac2(self):
-        return self.vendor == VENDOR_2015 and self.product in IPAC2_MODES
+        return board_mode(self.vendor, self.product,
+                          self.manufacturer, self.product_name) is not None
+
+    @property
+    def disguised(self):
+        """True when the board is wearing another device's usb identity."""
+        return self.is_ipac2 and self.vendor == VENDOR_XINPUT
+
+    @property
+    def firmware_summary(self):
+        """What can honestly be said about the firmware version.
+
+        The borrowed identity includes bcdDevice, so in Xinput the version on
+        the wire is the Xbox pad's, not the board's - printing it as firmware
+        invites someone to go looking for a firmware fault that is not there.
+        What is still known is the floor: mode switching exists only on 1.50+,
+        so a board that reached Xinput at all is at least that.
+        """
+        if self.disguised:
+            return ("not reported in Xinput (the borrowed identity carries "
+                    "%s); 1.50+ implied by the board having a mode to switch"
+                    % self.firmware)
+        return "%s  (%s)" % (self.firmware, firmware_note(self.bcd & 0xFF))
+
+    @property
+    def supports_gamepad(self):
+        # In Xinput the board is a gamepad as we speak, and only 1.50+ can get
+        # there, so the bcdDevice rule is both unusable and unnecessary here.
+        if self.disguised:
+            return True
+        return firmware_supports_gamepad(self.bcd & 0xFF)
 
     def as_dict(self):
         return {
@@ -646,11 +741,13 @@ class DeviceInfo:
             "product": "%04x" % self.product,
             "name": self.name,
             "firmware": self.firmware,
-            "firmware_note": firmware_note(self.bcd & 0xFF),
-            "supports_gamepad": firmware_supports_gamepad(self.bcd & 0xFF),
+            "firmware_known": not self.disguised,
+            "firmware_note": self.firmware_summary,
+            "supports_gamepad": self.supports_gamepad,
             "mode": self.mode,
             "interface": self.interface,
             "usb_path": self.usb_path,
+            "disguised": self.disguised,
         }
 
 
@@ -662,10 +759,11 @@ def _read_sysfs(path, default=None):
         return default
 
 
-def find_devices(include_unsupported=False) -> list:
+def find_devices(include_unsupported=False, sys_root="/sys") -> list:
     """Find hidraw nodes belonging to Ultimarc boards."""
     found = []
-    for node in sorted(glob.glob("/sys/class/hidraw/hidraw*")):
+    pattern = os.path.join(sys_root, "class", "hidraw", "hidraw*")
+    for node in sorted(glob.glob(pattern)):
         hid_dir = os.path.realpath(os.path.join(node, "device"))
         iface_dir = os.path.dirname(hid_dir)
         usb_dir = os.path.dirname(iface_dir)
@@ -675,11 +773,16 @@ def find_devices(include_unsupported=False) -> list:
         if vendor is None or product is None:
             continue
         vendor, product = int(vendor, 16), int(product, 16)
-        if vendor not in (VENDOR_2015, VENDOR_PRE2015):
+        manufacturer = _read_sysfs(os.path.join(usb_dir, "manufacturer"))
+        product_name = _read_sysfs(os.path.join(usb_dir, "product"))
+
+        # A board in Xinput mode is only ours if its strings say so, which is
+        # what keeps a genuine Xbox controller out of the list entirely - it
+        # must never turn up as a candidate for a config probe.
+        ours = board_mode(vendor, product, manufacturer, product_name) is not None
+        if not ours and vendor not in (VENDOR_2015, VENDOR_PRE2015):
             continue
-        if not include_unsupported and not (
-            vendor == VENDOR_2015 and product in IPAC2_MODES
-        ):
+        if not include_unsupported and not ours:
             continue
 
         bcd_text = _read_sysfs(os.path.join(usb_dir, "bcdDevice"), "0000")
@@ -701,9 +804,78 @@ def find_devices(include_unsupported=False) -> list:
                 bcd=bcd,
                 interface=interface,
                 usb_path=os.path.basename(usb_dir),
+                manufacturer=manufacturer,
+                product_name=product_name,
             )
         )
     return found
+
+
+def find_usb_boards(sys_root="/sys") -> list:
+    """Boards on the usb bus, whether or not they expose a hid node.
+
+    find_devices() can only see a board that has a /dev/hidraw node. In Xinput
+    the board is bound by xpad rather than usbhid and may expose no hid
+    interface at all - and answering "no board found" for a board that is
+    plainly plugged in is worse than useless. This finds it on the bus so the
+    tool can name what it is and what to do about it. There is no config node,
+    so `path` is None.
+    """
+    found = []
+    pattern = os.path.join(sys_root, "bus", "usb", "devices", "*")
+    for usb_dir in sorted(glob.glob(pattern)):
+        if ":" in os.path.basename(usb_dir):
+            continue  # an interface directory, not a device
+        vendor = _read_sysfs(os.path.join(usb_dir, "idVendor"))
+        product = _read_sysfs(os.path.join(usb_dir, "idProduct"))
+        if vendor is None or product is None:
+            continue
+        try:
+            vendor, product = int(vendor, 16), int(product, 16)
+        except ValueError:
+            continue
+        manufacturer = _read_sysfs(os.path.join(usb_dir, "manufacturer"))
+        product_name = _read_sysfs(os.path.join(usb_dir, "product"))
+        if board_mode(vendor, product, manufacturer, product_name) is None:
+            continue
+
+        try:
+            bcd = int(_read_sysfs(os.path.join(usb_dir, "bcdDevice"), "0000"), 16)
+        except ValueError:
+            bcd = 0
+        found.append(
+            DeviceInfo(
+                path=None,
+                vendor=vendor,
+                product=product,
+                bcd=bcd,
+                interface=-1,
+                usb_path=os.path.basename(usb_dir),
+                manufacturer=manufacturer,
+                product_name=product_name,
+            )
+        )
+    return found
+
+
+def no_config_node_reason(devices: list) -> str:
+    """What to tell someone whose board is on the bus but has no hid node."""
+    modes = ", ".join(sorted({d.mode for d in devices}))
+    if all(d.disguised for d in devices):
+        return (
+            "the board is in %s mode and exposes no hid interface, so there "
+            "is nothing to send the config protocol to. This is what Ultimarc "
+            "document: the config interface is not available in Xinput.\n"
+            "Hold Start1+P1SW1 for 10s to switch to keyboard mode, or hold "
+            "P1SW1 while plugging in usb. Both put the board back on "
+            "d209:0420, where it can be read and written." % modes
+        )
+    return (
+        "the board is on the usb bus in %s mode but has no /dev/hidraw node. "
+        "The kernel may not have bound usbhid, or another process (a VM's usb "
+        "passthrough) holds the device - check `lsusb -t` for Driver=usbhid."
+        % modes
+    )
 
 
 def select_device(explicit_path=None) -> DeviceInfo:
@@ -716,11 +888,21 @@ def select_device(explicit_path=None) -> DeviceInfo:
 
     devices = find_devices(include_unsupported=True)
     if not devices:
+        # The board may still be on the bus with no hid node - which is a
+        # different problem, with a different fix, from it being absent.
+        on_bus = find_usb_boards()
+        if on_bus:
+            raise DeviceError(no_config_node_reason(on_bus))
         raise DeviceError(
-            "no Ultimarc board found - no /dev/hidraw node belongs to one.\n"
-            "  - `lsusb | grep -i d20` shows it?  the kernel may not have bound "
+            "no Ultimarc board found - nothing on the usb bus matches one.\n"
+            "  - `lsusb` shows d209:04xx?  the kernel may not have bound "
             "usbhid, or another process (a VM's USB passthrough) holds the "
             "device - check `lsusb -t` for Driver=usbhid\n"
+            "  - `lsusb` shows 045e:028e?  that is an Xbox 360 pad's id, which "
+            "the board wears in Xinput mode. It is identified by its usb "
+            "strings, so if this is the board and it is still not found, its "
+            "strings are not what we expect - report `lsusb -v -d 045e:028e | "
+            "grep -i -A2 iManufacturer`\n"
             "  - nothing in lsusb?  it is a cable, port or power problem"
         )
 
@@ -963,11 +1145,19 @@ def open_board(args):
         board.timeout = 2.0
         return board
 
+    hint = (
+        "Hold Start1+P1SW1 for 10s, or hold P1SW1 while plugging in usb, to "
+        "get back to keyboard mode, where the config interface is known good."
+    )
+    if any(info.disguised for info in candidates):
+        hint = (
+            "This board is in Xinput mode. It exposes a hid node there, but "
+            "none of its interfaces answered - Ultimarc document the config "
+            "interface as unreachable in Xinput, and this looks like that.\n"
+        ) + hint
     raise DeviceError(
-        "no interface answered a config read. Tried: %s.\n"
-        "If the board is in Xinput mode the config interface is not exposed - "
-        "hold P1SW1 while plugging in USB to force it back to keyboard mode."
-        % ", ".join(tried)
+        "no interface answered a config read. Tried: %s.\n%s"
+        % (", ".join(tried), hint)
     )
 
 
@@ -1178,18 +1368,31 @@ def pins_for_action(profile, name, player=None) -> list:
 class InputDevice:
     """One /dev/input/eventN node belonging to a board we care about."""
 
-    def __init__(self, path, name, vendor, product, interface, joystick):
+    def __init__(self, path, name, vendor, product, interface, joystick,
+                 manufacturer=None, product_name=None):
         self.path = path
         self.name = name
         self.vendor = vendor
         self.product = product
         self.interface = interface
         self.joystick = joystick
+        self.manufacturer = manufacturer
+        self.product_name = product_name
         self.player = None  # filled in for joystick nodes, in interface order
 
     @property
     def node(self):
         return os.path.basename(self.path)
+
+    @property
+    def ours(self):
+        """Whether this node belongs to the board.
+
+        In Xinput mode the kernel binds xpad and names the node after an Xbox
+        pad, so the evdev name is no help; the usb strings behind it are.
+        """
+        return board_mode(self.vendor, self.product,
+                          self.manufacturer, self.product_name) is not None
 
     def as_dict(self):
         return {
@@ -1198,6 +1401,7 @@ class InputDevice:
             "name": self.name,
             "interface": self.interface,
             "player": self.player,
+            "ours": self.ours,
         }
 
 
@@ -1228,7 +1432,13 @@ def find_input_devices(all_devices=False, sys_root="/sys") -> list:
             vendor, product = int(vendor, 16), int(product, 16)
         except ValueError:
             continue
-        ours = vendor == VENDOR_2015 and product in IPAC2_MODES
+        usb_dir = _ancestor_with(dev_dir, "idVendor")
+        manufacturer = product_name = None
+        if usb_dir:
+            manufacturer = _read_sysfs(os.path.join(usb_dir, "manufacturer"))
+            product_name = _read_sysfs(os.path.join(usb_dir, "product"))
+
+        ours = board_mode(vendor, product, manufacturer, product_name) is not None
         if not ours and not all_devices:
             continue
 
@@ -1254,10 +1464,12 @@ def find_input_devices(all_devices=False, sys_root="/sys") -> list:
                 product=product,
                 interface=interface,
                 joystick=joystick,
+                manufacturer=manufacturer,
+                product_name=product_name,
             )
         )
 
-    pads = sorted([d for d in found if d.joystick and d.vendor == VENDOR_2015],
+    pads = sorted([d for d in found if d.joystick and d.ours],
                   key=lambda d: (d.interface, d.path))
     for index, dev in enumerate(pads):
         dev.player = index + 1
@@ -1937,8 +2149,17 @@ def cmd_list(args) -> int:
 
     devices = find_devices(include_unsupported=True)
     if not devices:
+        on_bus = find_usb_boards()
+        if on_bus:
+            for dev in on_bus:
+                _print_device(dev)
+                print()
+            print("Config node: %s" % no_config_node_reason(on_bus),
+                  file=sys.stderr)
+            return 1
         print("No Ultimarc board found.")
-        print("Check `lsusb | grep -i d20`; reading /dev/hidraw* needs root.")
+        print("Check `lsusb` for d209:04xx (keyboard/Dinput) or 045e:028e "
+              "(Xinput); reading /dev/hidraw* needs root.")
         return 1
 
     for dev in devices:
@@ -1955,11 +2176,19 @@ def cmd_list(args) -> int:
 
 
 def _print_device(dev: DeviceInfo):
-    print("%s  %04x:%04x  %s" % (dev.path, dev.vendor, dev.product, dev.name))
+    print("%s  %04x:%04x  %s"
+          % (dev.path or "(no hid node)", dev.vendor, dev.product, dev.name))
+    if dev.disguised:
+        # Worth saying out loud: lsusb calls this a Microsoft pad, and without
+        # this line the ids above look like the tool has found the wrong device.
+        print("  identity   borrowed from an Xbox 360 pad; recognised by its "
+              "usb strings (%s / %s)"
+              % (dev.manufacturer or "?", dev.product_name or "?"))
     print("  mode       %s" % dev.mode)
-    print("  firmware   %s  (%s)" % (dev.firmware, firmware_note(dev.bcd & 0xFF)))
-    print("  interface  %d" % dev.interface)
-    print("  gamepad    %s" % ("yes" if firmware_supports_gamepad(dev.bcd & 0xFF) else "no"))
+    print("  firmware   %s" % dev.firmware_summary)
+    if dev.interface >= 0:
+        print("  interface  %d" % dev.interface)
+    print("  gamepad    %s" % ("yes" if dev.supports_gamepad else "no"))
 
 
 def cmd_dump(args) -> int:
@@ -2534,16 +2763,12 @@ def _make_handler(args):
             if sys.platform != "linux" and not fake:
                 note = ("watching the panel needs Linux (/dev/input). Restart "
                         "with --fake-input to try this out here.")
-            elif not any(d.vendor == VENDOR_2015 for d in devices):
+            elif not any(d.ours for d in devices):
                 note = ("no /dev/input node belongs to the board. If `list` "
                         "finds it, the kernel may not have bound a keyboard "
                         "driver to it.")
             return {
-                "devices": [
-                    dict(d.as_dict(),
-                         ours=d.vendor == VENDOR_2015 and d.product in IPAC2_MODES)
-                    for d in devices
-                ],
+                "devices": [d.as_dict() for d in devices],
                 "fake": bool(fake),
                 "note": note,
                 "running": monitors.monitor is not None,
