@@ -57,10 +57,15 @@ VENDOR_XINPUT = 0x045E
 PRODUCT_XINPUT = 0x028E
 
 # Multi-mode firmware (1.50+) reports the board's current mode in its usb ids:
-# switching with Start1+P1SW2 re-enumerates it as a different device. This is
-# why a keyboard-mode config and a Dinput-mode config read back identical - the
-# mode is not in the config block at all. Xinput changes the vendor too, so
-# these are keyed on the pair rather than on the product id alone.
+# switching re-enumerates it as a different device, which is why the mode is
+# not in the config block at all. Xinput changes the vendor too, so these are
+# keyed on the pair rather than on the product id alone.
+#
+# The usb identity names the device *class*, not which of the five modes the
+# board is in - see MODE_HOTKEYS. Both Dinput modes present as 0421 and both
+# Xinput modes as 045e:028e, as far as we can tell, so a d209:0421 board may
+# be running its own config (mode 4) or the fixed preset map (mode 2) and the
+# descriptor cannot say which.
 IPAC2_MODES = {
     (VENDOR_2015, 0x0420): "keyboard",
     (VENDOR_2015, 0x0421): "Dinput game controller",
@@ -68,6 +73,48 @@ IPAC2_MODES = {
 }
 
 MODE_KEYBOARD = "keyboard"
+
+# Ultimarc's five modes, and the button held with Start1 for ten seconds to
+# reach each. The distinction that matters is preset vs user set: the preset
+# gamepad modes (2 and 3) run a fixed internal map and ignore the config block
+# entirely, so a profile written by this tool has no effect in them. Only
+# modes 1, 4 and 5 act on what we write.
+#
+# This is the reason a dump taken in "Dinput" looks like a stock map that has
+# nothing to do with what was last written: it was almost certainly taken in
+# mode 2, where the stock map is what the board is genuinely running.
+#
+# Source: the Multi-Mode tab on Ultimarc's I-PAC 2 product page - with one
+# entry contradicted on hardware, see MODE_HOTKEY_CONFLICTS. The fourth field
+# is whether the mode acts on the config; the fifth is what a board was
+# actually observed to enumerate as, or None where nobody has looked yet.
+MODE_HOTKEYS = [
+    (1, "P1SW1", "keyboard", True, "d209:0420"),
+    (2, "P1SW2", "Dinput preset", False, None),
+    (3, "P1SW3", "Xinput preset", False, None),
+    (4, "P1SW4", "Dinput user set", True, "045e:028e"),
+    (5, "P1SW5", "Xinput user set", True, None),
+]
+
+# Observed on firmware 1.55: Start1+P1SW4 flashes the led four times, so the
+# board agrees it selected mode 4, and then enumerates as 045e:028e - the
+# Xbox 360 pad identity, which is Xinput. Ultimarc document mode 4 as Dinput
+# User Set, and their own custom-Xinput recipe says to use Start1+P1SW4 to get
+# *back* to Dinput. Both cannot be true.
+#
+# Not resolved. It matters because Xinput exposes no hid interface, so a hotkey
+# advertised as "the gamepad mode you can still configure" instead lands the
+# board somewhere this tool cannot reach it at all. Until the full hotkey ->
+# product id table is recorded on hardware, mode 4 is described as contested
+# rather than as Dinput.
+MODE_HOTKEY_CONFLICTS = {
+    4: (
+        "Start1+P1SW4 is documented as Dinput (mode 4) but was observed to "
+        "put a 1.55 board into Xinput (045e:028e), where there is no config "
+        "interface. Check `list` after switching, and be ready to come back "
+        "with Start1+P1SW1 or by holding P1SW1 while plugging in usb."
+    ),
+}
 
 
 def looks_ultimarc(manufacturer, product_name) -> bool:
@@ -121,6 +168,29 @@ WRITE_SIZE = 260
 HEADER_WRITE = (0x50, 0xDD, 0x0F)  # 4th byte is the config bitfield
 HEADER_READ = (0x59, 0xDD, 0x0F, 0x00)
 
+# The four bytes past the 256 byte config. Captured from WinIPAC on a 1.55
+# board: its downloads end with a read header, not zero padding. Ultimarc-linux
+# does the same on its JPAC path (ipac.c writes 0x59 0xdd 0x0f into barray[256]
+# ..[258]) and zero-pads for the I-PAC 2, which is where this tool got its
+# zeros from. WinIPAC is the reference implementation, so follow WinIPAC.
+WRITE_TAIL = bytes(HEADER_READ)
+
+# Bit 1 of the config bitfield. Ultimarc-linux calls it accelerometer_uio and
+# QtPyUltimarc calls it accelerometer - a field belonging to the Ultimate I/O,
+# which is the only board in the family that has one. An I-PAC 2 does not.
+#
+# Captured from WinIPAC: an ordinary write after a pin change sends this bit
+# clear, and *File -> Force Board Reconfiguration* sends the same 260 bytes
+# with it set. Nothing else in the block differed. So on this board the bit is
+# what makes the board act on a download rather than merely store it, and the
+# open-source implementations never set it because they took the field name at
+# face value.
+#
+# One capture, one board, one firmware. Held as a strong inference rather than
+# a fact until a write with the bit set is confirmed to switch a mode that a
+# write without it does not.
+RECONFIGURE_BIT = 0x02
+
 # Bit 6 of a pin's shift byte marks it as the shift key. Real boards carry
 # 0x01 in the low bits of every pin's shift byte and 0x41 on the shift pin, so
 # this is set and cleared as a bit rather than written as a whole byte.
@@ -141,7 +211,9 @@ FIRMWARE_NOTES = [
     (0x22, 0x34, "keyboard only (single mode) - no gamepad without a firmware upgrade"),
     (0x34, 0x40, "mixed mode - keyboard AND gamepad at once"),
     (0x44, 0x50, "keyboard only (single mode) - no gamepad without a firmware upgrade"),
-    (0x50, 0x58, "multi-mode - keyboard/Dinput/Xinput switchable by hotkey"),
+    (0x50, 0x57, "multi-mode - keyboard/Dinput/Xinput switchable by hotkey"),
+    (0x57, 0x58, "multi-mode (beta) - a pin can be assigned as a mode change "
+                 "button, so switching need not be a ten second hotkey hold"),
 ]
 
 
@@ -192,19 +264,27 @@ def flash_write_blocked(info):
             "and then drop the flash commit, and Xinput is assumed to do the "
             "same - so treat what you write here as lasting only until the "
             "next power cycle.\n"
-            "Hold Start1+P1SW1 for 10s to switch to keyboard mode, write, "
-            "then switch back with Start1+P1SW3 (Xinput). The mode is not in "
-            "the config block, so switching back will not disturb what you "
-            "wrote." % info.mode
+            "Hold Start1+P1SW1 for 10s to switch to keyboard mode, then "
+            "write. The mode is not in the config block, so switching back "
+            "afterwards will not disturb what you wrote - but which hotkey "
+            "gets you to a *user set* Xinput mode is not settled: mode 3 "
+            "(Start1+P1SW3) is documented as the Xinput preset, which "
+            "ignores your config, and mode 4 has been seen landing in Xinput "
+            "too. Switch, then check with `list`." % info.mode
         )
     return (
         "the board is in %s mode, where a write is applied but never "
         "committed to flash - it takes effect immediately and then reverts on "
         "the next power cycle.\n"
-        "Hold Start1+P1SW1 for 10s to switch to keyboard mode, write, then "
-        "switch back with Start1+P1SW2 (Dinput). The mode is not in the "
-        "config block, so switching back will not disturb what you wrote."
-        % info.mode
+        "Hold Start1+P1SW1 for 10s to switch to keyboard mode, then write. "
+        "The mode is not in the config block, so switching back afterwards "
+        "will not disturb what you wrote.\n"
+        "Which hotkey to switch back with is not settled. Start1+P1SW2 is "
+        "mode 2, the Dinput *preset*, which runs a fixed internal map and "
+        "ignores your config. Start1+P1SW4 is documented as mode 4, Dinput "
+        "user set - but on a 1.55 board it was observed to land in Xinput "
+        "instead, where this tool cannot reach the board at all. Switch, "
+        "then check with `list` before assuming." % info.mode
     )
 
 
@@ -302,9 +382,28 @@ SYSTEM_CODES = {
     "EXPLORER": 0xFC, "WAIT 3 SEC": 0xFE,
 }
 
+# Gamepad buttons start at 0x8e, not 0x90.
+#
+# QtPyUltimarc's IPACSeriesMapping starts them at 0x90, and this table copied
+# that. Confirmed wrong against hardware: with a board read by WinIPAC, 0x8e is
+# "P1 Button 1 (A)" and 0x92 is "P1 Button 5 (LR)" - two points four apart on
+# both scales, so the origin is 0x8e and upstream is off by two. LR is Left
+# Rear, which is what Ultimarc's own multi-mode table calls button 5 in Xinput,
+# so that is a third agreement.
+#
+# The correction matters because the label is a promise: a profile asking for
+# GAMEPAD 1 used to send 0x90, which the board and the host both call button 3.
+#
+# Only the bottom of the range is confirmed. Buttons are numbered up to where
+# ANALOG 0 begins at 0xB0, which makes 34 of them; nobody has checked whether
+# the board really has 33 and 34 or whether those two codes mean something
+# else, so they are named for consistency rather than from evidence.
+GAMEPAD_FIRST_CODE = 0x8E
+GAMEPAD_COUNT = 34
+
 GAME_CODES = {}
-for _n in range(1, 33):
-    GAME_CODES["GAMEPAD %d" % _n] = 0x90 + _n - 1
+for _n in range(1, GAMEPAD_COUNT + 1):
+    GAME_CODES["GAMEPAD %d" % _n] = GAMEPAD_FIRST_CODE + _n - 1
 for _n in range(0, 8):
     GAME_CODES["ANALOG %d" % _n] = 0xB0 + _n
 # Upstream lists HAT 2 as 0xDC, which is out of sequence and lands in the
@@ -367,7 +466,7 @@ class DeviceError(Exception):
 
 def write_frames(buf: bytes) -> list:
     """The 5-byte messages that carry a config to the board."""
-    padded = bytes(buf[:CONFIG_SIZE]).ljust(WRITE_SIZE, b"\x00")
+    padded = bytes(buf[:CONFIG_SIZE]).ljust(CONFIG_SIZE, b"\x00") + WRITE_TAIL
     return [
         bytes([REPORT_ID]) + padded[pos:pos + CHUNK]
         for pos in range(0, WRITE_SIZE, CHUNK)
@@ -491,12 +590,17 @@ def _decode_macros(data: bytes) -> list:
     return macros
 
 
-def encode_config(profile: dict, base: bytes) -> bytearray:
+def encode_config(profile: dict, base: bytes, reconfigure=False) -> bytearray:
     """Apply a profile on top of the board's current config.
 
     Read-modify-write on purpose: bytes whose meaning we do not know - and
     on this board there are some, including whatever selects game controller
     mode - survive untouched.
+
+    RECONFIGURE_BIT is the exception. It is set only when asked for, never
+    inherited from the base: a config read back from a board that was last
+    reconfigured would otherwise carry the bit forward and make every
+    subsequent write a reconfiguration too.
     """
     buf = bytearray(base[:CONFIG_SIZE])
     if len(buf) != CONFIG_SIZE:
@@ -512,6 +616,7 @@ def encode_config(profile: dict, base: bytes) -> bytearray:
         cfg = (cfg & ~0x18) | (DEBOUNCE[value] << 3)
     if "paclink" in profile:
         cfg = (cfg | 0x04) if profile["paclink"] else (cfg & ~0x04)
+    cfg = (cfg | RECONFIGURE_BIT) if reconfigure else (cfg & ~RECONFIGURE_BIT)
     buf[3] = cfg
 
     data = memoryview(buf)[4:]
@@ -585,15 +690,20 @@ def _encode_macros(macros: list, data: memoryview) -> dict:
     return codes
 
 
-def as_write_command(buf: bytes) -> bytes:
+def as_write_command(buf: bytes, reconfigure=False) -> bytes:
     """Put the write header on a config buffer.
 
     Reads come back headed [0x00, 0x00, firmware, cfg]; writes must be
     headed 0x50 0xdd 0x0f. Byte 3 (the config bitfield) is real config and is
-    left alone.
+    left alone, apart from RECONFIGURE_BIT, which is stated rather than
+    carried over - see encode_config.
     """
     out = bytearray(buf[:CONFIG_SIZE])
     out[0], out[1], out[2] = HEADER_WRITE
+    if reconfigure:
+        out[3] |= RECONFIGURE_BIT
+    else:
+        out[3] &= ~RECONFIGURE_BIT
     return bytes(out)
 
 
@@ -1324,7 +1434,7 @@ def event_action(etype: int, code: int):
             # which is what it does for a device that presents as a joystick.
             # Every event carries its raw code, so if a real board in Dinput
             # mode disagrees the offset is visible rather than silent.
-            return "gamepad", GAME_CODES["GAMEPAD %d" % (code - BTN_JOYSTICK + 1)]
+            return "gamepad", GAME_CODES["GAMEPAD %d" % (code - BTN_JOYSTICK + 1)]  # noqa: E501
         return "button", None
     if etype == EV_ABS:
         if ABS_HAT0X <= code < ABS_HAT0X + 4:
@@ -2206,7 +2316,10 @@ def cmd_dump(args) -> int:
         print(
             "WARNING: dumped in %s mode, where a read does not report the live "
             "config.\n         Switch to keyboard mode (Start1+P1SW1, ten "
-            "seconds) for a dump you can trust." % info.mode,
+            "seconds) for a dump you can trust. If this is a preset gamepad "
+            "mode (2 or 3) the map you are seeing is the board's fixed "
+            "internal one, which is unrelated to what was last written."
+            % info.mode,
             file=sys.stderr,
         )
 
@@ -2229,12 +2342,16 @@ def cmd_apply(args) -> int:
     profile = load_profile(args.profile)
     with open_board(args) as board:
         current = board.read_config()
-        updated = bytes(encode_config(profile, current))
+        updated = bytes(encode_config(profile, current, args.reconfigure))
         changes = diff_config(current, updated)
 
         warning = _gamepad_warning(profile, board.info)
         if warning:
             print(warning, file=sys.stderr)
+
+        hotkeys = hotkey_warning(updated)
+        if hotkeys:
+            print("WARNING: %s\n" % hotkeys, file=sys.stderr)
 
         blocked = flash_write_blocked(board.info)
         if blocked and args.dry_run:
@@ -2276,6 +2393,9 @@ def cmd_apply(args) -> int:
             "wrote %d bytes in %d messages to %s"
             % (WRITE_SIZE, WRITE_SIZE // CHUNK, board.info.path)
         )
+        note = mode_switch_note(updated, board.info)
+        if note:
+            print("note: %s" % note, file=sys.stderr)
 
     return 0
 
@@ -2289,9 +2409,124 @@ def _fmt_byte(value: int) -> str:
     return "0x%02x" % value
 
 
+GAMEPAD_PREFIXES = ("GAMEPAD", "HAT", "ANALOG")
+
+
+def config_kind(raw: bytes) -> str:
+    """Which of keyboard, gamepad or mixed a download reads as.
+
+    Multi-mode firmware picks its mode from the config it is sent rather than
+    from a field in it. Ultimarc document three rules: a keyboard-only
+    download moves a board in mode 4 to keyboard mode 1, a gamepad-only one
+    moves a board in mode 1 to Dinput mode 4, and a gamepad-only one carrying
+    an Xbox HOME key moves it to Xinput mode 5.
+
+    Everything else is "mixed", and mixed is the case worth naming, because it
+    is easy to produce by accident. A profile that assigns gamepad buttons but
+    leaves the stick pins alone is not gamepad-only once it is encoded: the
+    unassigned pins keep whatever the board already had, which on a factory
+    board is keycodes. The download is then mixed and the board stays where it
+    is - which looks exactly like the write having been ignored.
+    """
+    data = raw[4:]
+    kinds = set()
+    for name in PIN_ORDER:
+        ai, alt_i, _ = PIN_TABLE[name]
+        for index in (ai, alt_i):
+            action = code_to_name(data[index])
+            if action is None or action == NONE:
+                continue  # unassigned, or a macro/unknown byte - no opinion
+            kinds.add(
+                "gamepad" if action.split()[0] in GAMEPAD_PREFIXES else "keyboard"
+            )
+    if len(kinds) == 1:
+        return kinds.pop()
+    return "mixed"
+
+
+# Start1 held with one of these for ten seconds selects a mode. They are
+# ordinary pins, so a profile can assign them anything - including actions
+# that do not exist in the mode the board is currently in.
+MODE_SELECT_PINS = ("1sw1", "1sw2", "1sw3", "1sw4", "1sw5")
+
+
+def hotkey_warning(raw: bytes):
+    """Whether this config would disarm the board's mode-switch hotkeys.
+
+    Mode switching is Start1 (as the I-PAC shift control) held with P1SW1-5.
+    Those are the same six pins a profile is free to reassign, and a gamepad
+    action on them is inert while the board is in keyboard mode - so a gamepad
+    profile written in keyboard mode can leave the board with no working way
+    to get to the gamepad mode it was written for.
+
+    Recoverable, but only by the one route that ignores the config entirely:
+    holding P1SW1 while plugging in usb. Worth saying before the write, not
+    after.
+    """
+    data = raw[4:]
+    shift_pins = [
+        name for name in PIN_ORDER
+        if data[PIN_TABLE[name][2]] & SHIFT_BIT
+    ]
+    if not shift_pins:
+        return (
+            "this config sets no I-PAC shift key. Ultimarc document mode "
+            "switching as requiring one, so Start1+P1SW1-5 will stop working "
+            "and the only way back is holding P1SW1 while plugging in usb."
+        )
+
+    def inert(name):
+        # An unassigned pin decodes to NONE, which is falsy but not None.
+        action = code_to_name(data[PIN_TABLE[name][0]])
+        if not action:
+            return False
+        return action.split()[0] in GAMEPAD_PREFIXES
+
+    dead = [n for n in shift_pins + list(MODE_SELECT_PINS) if inert(n)]
+    if not dead:
+        return None
+    return (
+        "this config puts gamepad actions on %s, which the mode-switch "
+        "hotkeys use (%s as the shift key, held with P1SW1-5). Gamepad "
+        "actions do nothing while the board is in keyboard mode, so after "
+        "this write Start1+P1SW1-5 will not switch modes and the only way "
+        "back is holding P1SW1 while plugging in usb.\n"
+        "Leave those pins on keycodes if you want the hotkeys to keep "
+        "working." % (", ".join(dead), ", ".join(shift_pins))
+    )
+
+
+def mode_switch_note(raw: bytes, info: DeviceInfo):
+    """What the board is expected to do with its mode after this download."""
+    kind = config_kind(raw)
+    if kind == "gamepad" and info.mode == MODE_KEYBOARD:
+        return (
+            "this is a gamepad-only config, so the board is expected to "
+            "switch itself to Dinput mode 4 (or Xinput mode 5, if it carries "
+            "an Xbox HOME button) - Ultimarc's firmware picks the mode from "
+            "what it is sent. Check with `lsusb | grep -i d209`: 0421 means "
+            "it switched. If it stayed on 0420, hold Start1+P1SW4 for 10s."
+        )
+    if kind == "keyboard" and info.mode != MODE_KEYBOARD:
+        return (
+            "this is a keyboard-only config, so the board is expected to "
+            "switch itself back to keyboard mode 1."
+        )
+    if kind == "mixed":
+        return (
+            "this config mixes keyboard and gamepad actions, so the board "
+            "will stay in %s mode - the automatic switch only fires for a "
+            "download that is entirely one or the other. Pins the profile "
+            "leaves unassigned keep what the board already had, which is how "
+            "a gamepad profile ends up mixed; assign every pin, or switch "
+            "mode by hand with Start1+P1SW4 held for 10s." % info.mode
+        )
+    return None
+
+
 def _gamepad_warning(profile: dict, info: DeviceInfo):
     uses_gamepad = any(
-        str(pin.get(field, "")).upper().startswith(("GAMEPAD", "HAT", "ANALOG"))
+        str(pin.get(field, "")).upper().startswith(GAMEPAD_PREFIXES)
         for pin in profile.get("pins", [])
         for field in ("action", "alternate_action")
     )
@@ -2307,7 +2542,8 @@ def _gamepad_warning(profile: dict, info: DeviceInfo):
 
 def cmd_restore(args) -> int:
     profile = load_profile(args.backup)
-    raw = as_write_command(raw_from_profile(profile, args.backup))
+    raw = as_write_command(raw_from_profile(profile, args.backup),
+                           args.reconfigure)
     with open_board(args) as board:
         for note in import_notes(profile, board.info):
             print("note: %s" % note, file=sys.stderr)
@@ -2526,6 +2762,14 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="write even in a mode where the board will not commit to flash",
     )
+    p.add_argument(
+        "--reconfigure",
+        action="store_true",
+        help="set the reconfigure bit, which is what WinIPAC's File -> Force "
+             "Board Reconfiguration sends. Makes the board act on the "
+             "download rather than only store it, including switching mode "
+             "if the config calls for one",
+    )
     p.set_defaults(func=cmd_apply)
 
     p = sub.add_parser("restore", help="write a dump back byte for byte", parents=[common])
@@ -2537,6 +2781,14 @@ def build_parser() -> argparse.ArgumentParser:
         "--force",
         action="store_true",
         help="write even in a mode where the board will not commit to flash",
+    )
+    p.add_argument(
+        "--reconfigure",
+        action="store_true",
+        help="set the reconfigure bit, which is what WinIPAC's File -> Force "
+             "Board Reconfiguration sends. Makes the board act on the "
+             "download rather than only store it, including switching mode "
+             "if the config calls for one",
     )
     p.set_defaults(func=cmd_restore)
 
@@ -2960,11 +3212,14 @@ def _make_handler(args):
             dry_run = bool(payload.get("dry_run"))
             with open_board(args) as board:
                 current = board.read_config()
-                updated = bytes(encode_config(profile, current))
+                updated = bytes(encode_config(
+                    profile, current, bool(payload.get("reconfigure"))))
                 result = self._changes_result(board, current, updated, profile)
                 blocked = flash_write_blocked(board.info)
                 if blocked:
                     result["flash_warning"] = blocked
+                result["mode_note"] = mode_switch_note(updated, board.info)
+                result["hotkey_warning"] = hotkey_warning(updated)
                 if not dry_run and result["changes"]:
                     if blocked and not payload.get("force"):
                         raise ProtocolError(blocked)
@@ -3005,7 +3260,8 @@ def _make_handler(args):
             """Byte-exact: write a dump's 256 bytes back, macros and all."""
             dry_run = bool(payload.get("dry_run"))
             profile, origin = self._incoming(payload)
-            updated = as_write_command(raw_from_profile(profile, origin))
+            updated = as_write_command(raw_from_profile(profile, origin),
+                                       bool(payload.get("reconfigure")))
 
             with open_board(args) as board:
                 current = board.read_config()
@@ -3015,6 +3271,8 @@ def _make_handler(args):
                 blocked = flash_write_blocked(board.info)
                 if blocked:
                     result["flash_warning"] = blocked
+                result["mode_note"] = mode_switch_note(updated, board.info)
+                result["hotkey_warning"] = hotkey_warning(updated)
                 if not dry_run and result["changes"]:
                     if blocked and not payload.get("force"):
                         raise ProtocolError(blocked)
@@ -3132,27 +3390,52 @@ PAGE = """<!doctype html>
       <button id="download">Download JSON</button>
       <button id="clear">Reset all pins</button>
     </div>
+    <label class="row" style="margin-top:.6rem;gap:.4rem;align-items:flex-start">
+      <input type="checkbox" id="reconfigure">
+      <span class="muted">Reconfigure the board after writing &mdash; sets the
+      bit WinIPAC's <em>File &rarr; Force Board Reconfiguration</em> sends, so the
+      board acts on the download rather than only storing it. Needed for a
+      change of mode to take effect; harmless otherwise.</span>
+    </label>
     <div id="status"></div>
   </div>
 
   <div class="card">
     <h2 style="margin-top:0">Changing mode</h2>
-    <p class="muted">The board's mode is not stored in its configuration - it is
-    a property of how the board presents itself over USB, and it is changed by
-    holding buttons on the panel, not from here. Hold for a full 10 seconds:</p>
+    <p class="muted">There are five modes, and the one that matters is
+    <strong>preset versus user set</strong>: the preset gamepad modes run a fixed
+    internal map and ignore the configuration entirely, so nothing written here
+    has any effect in them. Hold for a full 10 seconds:</p>
     <table>
       <tr><th>hold</th><th>gives</th><th>notes</th></tr>
-      <tr><td class="pin">Start1 + P1SW1</td><td>keyboard</td>
-          <td class="muted">sends keycodes; this tool can configure it</td></tr>
-      <tr><td class="pin">Start1 + P1SW2</td><td>Dinput</td>
-          <td class="muted">two game controllers; this tool can still configure it</td></tr>
-      <tr><td class="pin">Start1 + P1SW3</td><td>Xinput</td>
-          <td class="muted">two Xbox 360 pads - <strong>this tool cannot reach the
-          board in this mode</strong></td></tr>
+      <tr><td class="pin">Start1 + P1SW1</td><td>1 &mdash; keyboard</td>
+          <td class="muted">sends keycodes; uses your config</td></tr>
+      <tr><td class="pin">Start1 + P1SW2</td><td>2 &mdash; Dinput preset</td>
+          <td class="muted"><strong>ignores your config</strong> and runs a fixed
+          internal map</td></tr>
+      <tr><td class="pin">Start1 + P1SW3</td><td>3 &mdash; Xinput preset</td>
+          <td class="muted"><strong>ignores your config</strong>; this tool also
+          cannot reach the board in Xinput</td></tr>
+      <tr><td class="pin">Start1 + P1SW4</td><td>4 &mdash; contested</td>
+          <td class="muted">documented as Dinput using your config, but observed
+          putting a 1.55 board into <strong>Xinput</strong>, where this tool cannot
+          reach it. Check with the board panel above after switching</td></tr>
+      <tr><td class="pin">Start1 + P1SW5</td><td>5 &mdash; Xinput user set</td>
+          <td class="muted">uses your config, but this tool cannot reach the board
+          in Xinput</td></tr>
     </table>
-    <p class="muted">Start1 must be the shift key for these to work. If a switch
-    goes wrong, hold P1SW1 while plugging in the USB cable to force keyboard
-    mode.</p>
+    <p class="muted">The mode is not stored in the configuration &mdash; it is a
+    property of how the board presents itself over USB. But the board does
+    <em>choose</em> its mode from what it is sent: a download that is entirely
+    keyboard actions moves it to mode 1, one that is entirely gamepad actions
+    moves it to mode 4. A download mixing the two leaves the mode alone, and
+    unassigned pins keep whatever the board already had &mdash; which is how a
+    gamepad profile ends up mixed without anyone meaning it to.</p>
+    <p class="muted">Start1 must be the shift key for these to work, and the
+    pin it is on must carry a keycode &mdash; a gamepad action there is inert in
+    keyboard mode and the hotkeys stop responding. If a switch goes wrong, hold
+    P1SW1 while plugging in the USB cable to force keyboard mode; that route
+    ignores the configuration entirely and always works.</p>
   </div>
 
   <div class="card">
@@ -3307,6 +3590,20 @@ function renderChanges(result, target) {
     $(target).insertAdjacentHTML('afterbegin',
       `<div class="banner warn">${esc(result.flash_warning)}</div>`);
   }
+  // The board picks its mode from what it is sent. Say which way it is
+  // expected to go, so "nothing happened" can be told apart from "it wrote
+  // fine and stayed in the mode it was already in".
+  if (result.mode_note) {
+    $(target).insertAdjacentHTML('afterbegin',
+      `<div class="banner">${esc(result.mode_note)}</div>`);
+  }
+  // Assigning gamepad actions to the six pins the mode hotkeys use leaves no
+  // way back except the power-up backdoor. Say it before the button, not
+  // after the panel has stopped responding to Start1+P1SW4.
+  if (result.hotkey_warning) {
+    $(target).insertAdjacentHTML('afterbegin',
+      `<div class="banner warn">${esc(result.hotkey_warning)}</div>`);
+  }
 }
 
 async function loadDevice() {
@@ -3335,7 +3632,11 @@ async function loadConfig() {
 async function send(dry) {
   say('working...');
   try {
-    renderChanges(await post('/api/config', { profile: collect(), dry_run: dry }));
+    renderChanges(await post('/api/config', {
+      profile: collect(),
+      dry_run: dry,
+      reconfigure: $('#reconfigure').checked,
+    }));
     if (!dry) { loadConfig(); loadSaved(); }
   } catch (err) {
     say(esc(err.message), 'err');
@@ -3627,7 +3928,8 @@ async function restoreExactly(source, name, dry) {
   saySaved('working...');
   try {
     renderChanges(await post('/api/restore',
-      Object.assign({ dry_run: dry }, source)), '#savedStatus');
+      Object.assign({ dry_run: dry, reconfigure: $('#reconfigure').checked },
+                    source)), '#savedStatus');
     if (!dry) { loadConfig(); loadSaved(); }
   } catch (err) {
     saySaved(esc(err.message), 'err');

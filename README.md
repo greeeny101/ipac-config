@@ -212,11 +212,38 @@ This is the usual reason to reach for the tool, and it depends on firmware:
 |---|---|
 | 1.22–1.33, 1.44–1.49 | **No.** Keyboard-only silicon-side; needs a firmware upgrade |
 | 1.34–1.39 | Yes — keyboard and gamepad simultaneously (config on interface 3) |
-| 1.50+ | Yes — multi-mode, switch with `Start1+P1SW2` held 10s |
+| 1.50+ | Yes — multi-mode, switch with `Start1+P1SW4` held 10s |
 
-`list` reports which you have. On 1.50+, the mode hotkeys are
-`Start1+P1SW1` keyboard, `Start1+P1SW2` Dinput, `Start1+P1SW3` Xinput. If a
-switch goes wrong, hold `P1SW1` while plugging in USB.
+`list` reports which you have.
+
+**There are five modes on 1.50+, and only three of them use your config.**
+Ultimarc's preset gamepad modes run a fixed internal map and ignore the config
+block entirely, which is not obvious from the hotkey layout:
+
+| Hold with Start1, 10s | Mode (documented) | Uses your config? | Observed on 1.55 |
+|---|---|---|---|
+| `P1SW1` | 1 — keyboard | **yes** | `d209:0420` ✅ |
+| `P1SW2` | 2 — Dinput preset | no — fixed internal map | not recorded |
+| `P1SW3` | 3 — Xinput preset | no — fixed internal map | not recorded |
+| `P1SW4` | 4 — Dinput user set | **yes** | `045e:028e` ⚠️ **Xinput** |
+| `P1SW5` | 5 — Xinput user set | **yes** | not recorded |
+
+Documented source: the Multi-Mode tab on [Ultimarc's I-PAC 2
+page](https://www.ultimarc.com/control-interfaces/i-pacs/i-pac2/).
+
+**`P1SW4` does not do what the documentation says.** On a 1.55 board the led
+flashes four times — so the board agrees it selected mode 4 — and it then
+enumerates as `045e:028e`, the Xbox 360 pad identity, which is Xinput. There
+is no hid interface in Xinput, so that hotkey lands the board somewhere this
+tool cannot reach it. Ultimarc's own custom-Xinput recipe says to use
+`Start1+P1SW4` to get *back* to Dinput, which cannot also be true.
+
+Unresolved. Until the whole table is recorded on hardware, treat mode 4 as
+contested and check with `list` after every switch. Coming back always works:
+`Start1+P1SW1`, or hold `P1SW1` while plugging in USB.
+
+If a switch appears to do nothing at all, check the shift pin — see "A gamepad
+profile can disarm the mode hotkeys" below.
 
 **Write in keyboard mode.** Dinput accepts a write, acts on it immediately,
 and never commits it to flash, so the board reverts on the next power cycle
@@ -226,10 +253,57 @@ any mode but keyboard; `--force` overrides. Switch to keyboard, write, then
 switch back — the mode is not in the config block, so switching back does not
 disturb what you wrote.
 
-**You probably do not need a gamepad profile at all.** On 1.50+ firmware,
-switching to Dinput makes the board present as two game controllers on its
-own; the pin-to-button mapping is internal and the config block is untouched.
-Switch mode, and Batocera sees controllers.
+**You may not need a gamepad profile at all.** On 1.50+ firmware, mode 2
+makes the board present as two game controllers with a fixed internal
+pin-to-button map, no config involved. Switch to mode 2, and Batocera sees
+controllers. You need a profile — and mode 4 — only when you want to choose
+which button each pin sends.
+
+### The board picks its own mode from what you send it
+
+Ultimarc document three rules, and they are the reason a correct write can
+look like it did nothing:
+
+- a **keyboard-only** download, board in mode 4 → board switches to mode 1
+- a **gamepad-only** download, board in mode 1 → board switches to mode 4
+- a gamepad-only download **carrying an Xbox HOME key**, board in mode 1 →
+  mode 5
+
+Anything mixed leaves the mode alone. This is easier to hit than it sounds,
+because *the download is the whole 256-byte block, not the profile*. Pins a
+profile does not assign keep whatever the board already had, and alternate
+(shifted) actions count too. Applying `profiles/batocera-gamepad.template.json`
+to a factory board leaves fifteen keycodes in place — the eight stick pins and
+seven alternate actions — so the download is mixed and the board stays in
+keyboard mode. `TestGamepadTemplateIsMixed` pins that down.
+
+`apply` now says which way it expects the mode to go, and says so explicitly
+when the answer is "nowhere, because this download is mixed".
+
+### A gamepad profile can disarm the mode hotkeys
+
+Confirmed on hardware. Mode switching is Start1 — as the I-PAC shift control —
+held with `P1SW1`..`P1SW5`. Those are six ordinary pins, and a gamepad profile
+reassigns all six:
+
+| pin | after the gamepad template | in keyboard mode |
+|---|---|---|
+| `1start` (shift key) | `GAMEPAD 9` | inert |
+| `1sw1`..`1sw5` (mode selectors) | `GAMEPAD 1`..`5` | inert |
+
+Gamepad actions do nothing while the board is in keyboard mode, so the board
+ends up with no working way to reach the gamepad mode the profile was written
+for. The shift *bit* survives — `encode_config` preserves it — but the pin
+sends an action that mode 1 has no use for.
+
+The way out is the one route that ignores the config entirely: **hold `P1SW1`
+while plugging in the USB cable**. Ultimarc document it as working
+"irrespective of the current board mode or input configuration". Writing a
+keyboard profile back puts keycodes on all six pins and re-arms the hotkeys.
+
+`apply` warns before writing any config that would do this, and names the
+pins. It does not refuse — the backdoor makes it recoverable, and someone
+configuring a panel that never leaves gamepad mode may well want it.
 
 ### Making Dinput actually work on Batocera
 
@@ -245,8 +319,12 @@ on `GAMEPAD 1`..`n`, then:
 # 1. keyboard mode - the only mode that commits to flash
 #    hold Start1+P1SW1 for ten seconds
 ipacconf.py apply profiles/your-gamepad.json
-# 2. hold Start1+P1SW2 for ten seconds -> Dinput
+# 2. hold Start1+P1SW4 for ten seconds -> Dinput, mode 4 (user set)
+#    NOT P1SW2, which is mode 2 and ignores what you just wrote
 ```
+
+If every pin including the sticks and the alternate actions is a gamepad
+action, step 2 should happen by itself.
 
 Batocera then detects the I-PAC pads and the joystick maps as up/down/left/
 right in the ES controller wizard. Confirmed on hardware.
@@ -265,7 +343,8 @@ from a keyboard encoder — pair that with sensible keycodes written by this too
 ## Protocol
 
 Reads return 256 bytes; writes send 260 (`IPACSERIES_SIZE`), the last four
-being zero padding — a short write is silently discarded. A full write is
+being a read header `59 dd 0f 00` — captured from WinIPAC, not padding. A
+short write is silently discarded. A full write is
 committed to flash **only in keyboard mode**; in Dinput it reaches RAM and
 goes no further.
 2015+ boards take the config as 4-byte chunks inside HID **output**
@@ -273,7 +352,7 @@ reports (report id 3) — `HIDIOCSOUTPUT` on the hidraw node for the config
 interface. Ultimarc's `wValue` of `0x0203` is `(report_type << 8) | report_id`,
 and type 2 is Output, not Feature; sending it as a Feature report makes the
 board STALL the transfer (`EPIPE`). Interface is 2 for firmware in `[0x40, 0x56)`, else 3. Keys are
-standard USB HID usage IDs; `0x90`+ is Ultimarc's gamepad/analog/hat range.
+standard USB HID usage IDs; `0x8e`+ is Ultimarc's gamepad/analog/hat range.
 Reading is a `0x59 0xdd 0x0f 0x00` request followed by an input report.
 
 Worked out from [Ultimarc-linux](https://github.com/katie-snow/Ultimarc-linux)
@@ -282,38 +361,41 @@ Worked out from [Ultimarc-linux](https://github.com/katie-snow/Ultimarc-linux)
 ### Modes live in the product id, not the config
 
 Multi-mode firmware (1.50+) reports the board's current mode as a **different
-USB product id**, and switching with `Start1+P1SW2` re-enumerates it:
+USB product id**, and switching re-enumerates it:
 
 | Product | Mode | Interfaces |
 |---|---|---|
-| `d209:0420` | keyboard | 3 |
-| `d209:0421` | Dinput game controller | 4 |
+| `d209:0420` | keyboard (mode 1) | 3 |
+| `d209:0421` | Dinput game controller (mode 2 or 4) | 4 |
+| `045e:028e` | Xinput game controller (mode 3 or 5) | — |
 
-**A read returns different bytes in each mode, and the Dinput read is the
-one to distrust.** Dumping in Dinput returns what looks like a stock internal
-map — joystick directions as GAMEPAD 10-13, the P2 side on ANALOG 1-5 —
-regardless of what is actually in flash. Switch back to keyboard and the real
-config is there, untouched.
+**The product id names the device class, not which of the five modes the board
+is in.** Both Dinput modes present as `0421`, so a `0421` board may be running
+your config (mode 4) or the fixed preset map (mode 2), and nothing in the
+descriptor says which.
 
-**The board's behaviour follows flash, not that read.** Confirmed on hardware:
-a profile written in keyboard mode is what the board acts on once switched to
-Dinput. So per-pin gamepad assignments *do* work — you just cannot verify them
-by dumping in Dinput.
+**That is what the "stale Dinput read" was.** An earlier version of this
+document recorded that dumping in Dinput returns what looks like a stock
+internal map — directions as GAMEPAD 10-13, the P2 side on ANALOG 1-5 —
+regardless of what is in flash, and called the read untrustworthy. The simpler
+explanation is that those dumps were taken in **mode 2**, where that map is
+what the board is genuinely running, because mode 2 ignores the config block
+by design. The board was not serving a stale map; it was in a mode we did not
+know existed.
+
+This is not settled on hardware. Re-dumping in **mode 4** (`Start1+P1SW4`) is
+the test: if the dump matches what was written, the theory holds and there is
+no mystery left. If mode 4 also returns the preset map, then there really is
+something undocumented and the old note should come back.
 
 **Not an interface-selection problem.** Checked on hardware: with the board in
-Dinput, exactly one of seven hidraw nodes answers a config read at all, and it
-is the one that returns the stale map. There is no other node holding the live
-config, so `open_board` picking the wrong interface is ruled out.
+Dinput, exactly one of seven hidraw nodes answers a config read at all. There
+is no other node holding a different config, so `open_board` picking the wrong
+interface is ruled out either way.
 
-What the Dinput read returns is the config as it was *before* the last
-keyboard-mode write — not a generic factory default. Why the board serves that
-while acting on something else is unknown; the mechanism is undocumented in
-both open-source implementations, and settling it means capturing WinIPAC over
-USB (see the bootloader notes below for the same problem).
-
-Practically it does not matter: dump in keyboard mode, judge Dinput by
-behaviour. `dump` warns when it is reading in a mode where the answer is not
-live.
+`dump` warns when it is reading in a mode where the answer may not be the live
+config, and says that a preset mode's map is unrelated to what was last
+written.
 
 `fixtures/ipac2-1.55-dinput.json` is byte-identical to the keyboard fixture
 beside it, which is what the earlier "the two modes are byte-identical" claim
@@ -323,12 +405,200 @@ no way to tell from the file. `dump` now writes `capturedIn` and
 `capturedProduct` for exactly this reason; both fixtures predate that and
 should be recaptured before being trusted.
 
-Switching is done by holding buttons — `Start1+P1SW1` keyboard, `+P1SW2`
-Dinput, `+P1SW3` Xinput, ten seconds each. WinIPAC can also switch in software
-(*File → Force Board Reconfiguration*), so a command for it exists, but it is
-not in either open-source implementation and we have not captured it. Since
-the mode is not in the config block, it must be a separate message — likely
-another `0x5x` header beside `0x50` (write) and `0x59` (read).
+Switching is done by holding buttons — see the five-mode table above, ten
+seconds each.
+
+### Force Board Reconfiguration
+
+WinIPAC has a *File → Force Board Reconfiguration* command, and Ultimarc's
+documented recipe for a custom Xinput map is *change settings → save → Force
+Board Reconfiguration*, with no separate "program the board" step. WinIPAC V2
+advertises itself as reading and writing the board "on the fly", so the config
+is likely already there and reconfiguration is the step that makes the board
+re-evaluate it and re-enumerate.
+
+**Captured, on a 1.55 board.** It is not a separate message. Every burst
+WinIPAC sent was a write (`0x50`) or a read (`0x59`) — the same two headers
+this tool already speaks. What it does instead is **set bit 1 of the config
+bitfield**.
+
+The capture holds two full 260-byte downloads: an ordinary write after a pin
+change, then *Force Board Reconfiguration*. They differ in exactly one byte:
+
+| | byte 3 | |
+|---|---|---|
+| ordinary write | `0x00` | store it |
+| Force Board Reconfiguration | `0x02` | store it **and act on it** |
+
+All 256 config bytes were identical. Nothing else in the session came close.
+
+Bit 1 is what Ultimarc-linux calls `accelerometer_uio` and QtPyUltimarc calls
+`accelerometer` — a field belonging to the Ultimate I/O, the only board in the
+family that has one. An I-PAC 2 does not, which is why neither open-source
+implementation ever sets it, and why the command looked like it was missing:
+it was hiding in a field everyone had taken at face value.
+
+`ipacconf.py` calls it `RECONFIGURE_BIT` and exposes it as `--reconfigure` on
+`apply` and `restore`, and a checkbox in the web UI. Off by default, matching
+WinIPAC, and never inherited from a config read back off the board — otherwise
+one reconfiguration would make every later write another one.
+
+**Held as a strong inference, not a fact.** One capture, one board, one
+firmware. The confirming test is a write that changes mode: with the bit set it
+should re-enumerate, without it it should not.
+
+### The trailing four bytes are a read header
+
+The same capture settles a second question. A download is 260 bytes, and this
+tool sent the last four as zero padding. **WinIPAC sends `59 dd 0f 00`** — a
+read request appended to the download.
+
+Ultimarc-linux does the same on its **JPAC** path, writing `0x59 0xdd 0x0f`
+into `barray[256]`..`[258]`
+([ipac.c:629](https://github.com/katie-snow/Ultimarc-linux/blob/master/src/libs/ipac.c#L629)),
+and zero-pads on the I-PAC 2 path — which is where this tool's zeros came from.
+WinIPAC is the reference implementation, so `WRITE_TAIL` now follows WinIPAC.
+A write is byte-for-byte what WinIPAC sends.
+
+#### Capturing it
+
+`analyse_capture.py` does the needle-finding. Run it on a tshark dump of the
+capture and it reports every config burst, classifies each by its header byte,
+and lists anything that is neither `0x50` nor `0x59`.
+
+**Capture with `usbmon` on the Linux host, not inside the VM.** USB
+passthrough hands the guest's URBs to the host's controller, so the host sees
+every transfer WinIPAC makes — and usbmon taps below the guest, which means
+nothing about the VM's USB emulation gets in the way.
+
+**Capture one bus, not all of them.** `usbmon0` is every bus on the machine,
+which is how a capture ends up holding the keystrokes typed into the host while
+it ran. Find the board's bus and record only that:
+
+```sh
+lsusb | grep -iE "d209|045e:028e"      # -> "Bus 001 Device 010: ID d209:0420"
+sudo modprobe usbmon
+sudo tshark -i usbmon1 -w capture.pcapng     # usbmon<BUS>, so bus 001 -> usbmon1
+```
+
+Make the recording diffable — the same action twice, in opposite directions,
+one file:
+
+1. Start the capture. Note the board's device number from `lsusb`.
+2. In WinIPAC, note the current mode. Wait ~3 seconds between every step, so
+   the bursts separate cleanly.
+3. *File → Force Board Reconfiguration* to get to Dinput.
+4. Wait, then *Force Board Reconfiguration* again to get back to keyboard.
+5. Stop the capture.
+
+Then:
+
+```sh
+tshark -r capture.pcapng -T fields -E header=y -E separator=, \
+  -e frame.number -e frame.time_relative \
+  -e usb.bus_id -e usb.device_address \
+  -e usb.urb_id -e usb.urb_type -e usb.endpoint_address \
+  -e usb.bmRequestType -e usb.setup.bRequest -e usb.setup.wValue \
+  -e usb.setup.wIndex -e usb.setup.wLength \
+  -e usb.capdata -e usb.data_fragment -e usbhid.data \
+  > capture.csv
+python3 analyse_capture.py capture.csv
+```
+
+`usbhid.data` and `usb.endpoint_address` are not optional. **The board's
+answers do not appear in any `usb.*` payload field** — they come back as
+interrupt IN reports on endpoint `0x84`, which Wireshark hands to the HID
+dissector. Leave them out and you see only what the host sent, never what the
+board said. They are worth more than the writes: a WinIPAC session carries one
+read per explicit refresh *plus one per download* (a download ends with a read
+header, and the board answers it), so consecutive reads reassemble into the
+board's config before and after every write and diff down to the single byte a
+pin change moved.
+
+**One invalid field name aborts the whole extraction** — tshark writes
+`Some fields aren't valid`, exits, and leaves an empty file that looks exactly
+like a failed capture. Field names vary by version (`usb.control.Data` exists
+in some builds and not others; `usb.irp_id` is USBPcap-only). If it complains,
+drop the field it names and re-run. `analyse_capture.py` needs only
+`usb.capdata`; everything else sharpens the report.
+
+Two usbmon-specific things the analyser handles, worth knowing about anyway:
+
+- **Every transfer is logged twice**, once submitted and once completed.
+  Messages are deduplicated by URB id, so a 65 message download does not read
+  as 130.
+- **The board changes usb device address when its mode changes**, because it
+  re-enumerates. So a capture of a switch spans two or more addresses — pass
+  all of them to `--address`, or leave it off. The analyser reports where the
+  address changed, and that boundary is the highest-signal thing in the file:
+  whatever went out immediately before it caused the switch, whatever its
+  header byte.
+
+Three outcomes, and all of them are answers:
+
+- **An unknown header appears.** That is the command. With both directions in
+  one capture, a byte that differs between them is the mode selector and one
+  that does not is part of the command.
+- **Nothing but `0x50` and `0x59`, but the address changed.** Force Board
+  Reconfiguration is a plain config download, and the mode change is the
+  firmware reacting to its content — this tool is missing nothing, and the
+  question closes.
+- **The address never changed.** No mode switch happened while recording, so
+  the capture missed it. The analyser says so rather than letting it read as
+  the second outcome.
+
+`--gap` tunes how much silence ends a burst (default 1 second).
+
+`*.pcap` and `*.pcapng` are gitignored. Read a capture before force-adding one
+as a fixture — see the note in `.gitignore`.
+
+#### Nothing on usbmonN
+
+Run `python3 analyse_capture.py capture.csv` on what you did get: it reports
+how many packets the file holds, which buses and device addresses appear, and
+what payload sizes. That separates the two failures — *the capture recorded
+nothing* from *the capture recorded the wrong bus*. In order of likelihood:
+
+**The bus is not 1.** `usbmon<N>` takes the **bus** number, not the device
+number, and not `1` by default. Check it with the board attached to the VM,
+since attaching can move it:
+
+```sh
+lsusb | grep -iE "d209|045e:028e"     # "Bus 003 Device 010" -> usbmon3
+```
+
+**The interface does not exist.** usbmon needs its module loaded and debugfs
+mounted, or tshark has nothing to open:
+
+```sh
+tshark -D | grep usbmon               # nothing listed? then:
+sudo modprobe usbmon
+sudo mount -t debugfs none /sys/kernel/debug     # if it is not already
+ls /sys/kernel/debug/usb/usbmon/
+```
+
+**The VM has the whole USB controller, not just the board.** If the controller
+was passed through with VFIO-PCI, the host kernel is not driving it and usbmon
+can never see that traffic — there is no host-side USB stack for it to tap.
+The tell is decisive: with the VM running and the board attached, the board is
+**absent from the host's `lsusb`**. The fix is to pass the *device* through
+instead (virt-manager's "USB Host Device", QEMU's `usb-host`), which routes it
+via usbfs where usbmon can see it. Per-device passthrough leaves the board
+visible in the host's `lsusb` the whole time.
+
+**Nothing happened during the capture.** WinIPAC talks to the board on
+explicit actions, so a capture that only spans idle time is genuinely empty.
+Smoke-test it live — this should print lines as you click around in WinIPAC:
+
+```sh
+sudo tshark -i usbmon0 -c 20
+```
+
+**Fallback: capture every bus.** `usbmon0` sidesteps the bus question
+entirely, at the cost of recording every device on the machine — read the
+`.gitignore` note before keeping such a file. Find the board's address in the
+analyser's output and narrow with `--address`, remembering that a mode switch
+moves the board to a new one, so pass all of them.
 
 **Xinput hides the board behind an Xbox pad's identity.** Confirmed on
 hardware: in Xinput the board does not enumerate as Ultimarc at all — it
@@ -434,11 +704,32 @@ passwords in there. Captures, and `lsusb -v` output with its device serial
 numbers, are gitignored for that reason; force-add deliberately once you've
 checked one.
 
-One deviation, in `ipacconf.py`'s pin table: QtPyUltimarc lists `2sw1` and
-`2sw5` with alternate-action indices that break the otherwise perfectly regular
-`action+50` layout, and one of them collides with `1sw5`'s. They look like
-typos, so all indices are derived from the rule. `--dry-run` will show it if a
-real board ever disagrees.
+Two deviations from QtPyUltimarc, both deliberate.
+
+**The pin table.** QtPyUltimarc lists `2sw1` and `2sw5` with alternate-action
+indices that break the otherwise perfectly regular `action+50` layout, and one
+of them collides with `1sw5`'s. They look like typos, so all indices are
+derived from the rule. `--dry-run` will show it if a real board ever disagrees.
+
+**Gamepad buttons start at `0x8e`, not `0x90`.** QtPyUltimarc's
+`IPACSeriesMapping` starts them at `0x90` and this table copied it. Confirmed
+wrong against hardware: with a board read by WinIPAC, `0x8e` is *P1 Button 1
+(A)* and `0x92` is *P1 Button 5 (LR)* — two points four apart on both scales,
+so the origin is `0x8e`. "LR" is Left Rear, which is what Ultimarc's own
+multi-mode table calls button 5 in Xinput; a third agreement.
+
+The label is a promise, and the old one was false: a profile asking for
+`GAMEPAD 1` sent `0x90`, which the board and the host both call button 3.
+
+⚠️ **This changes what an existing profile means.** A hand-written profile
+naming `GAMEPAD 5` now sends `0x92` where it used to send `0x94` — which is
+the fix, but it is a silent change if you wrote the profile by trial and error
+against the old numbering. Dumps and backups are unaffected: they carry `raw`
+bytes and `restore` is byte-exact. Only the *names* moved.
+
+Only the bottom of the range is confirmed. Buttons run up to where `ANALOG 0`
+starts at `0xB0`, making 34 of them; whether the board really has 33 and 34 is
+unchecked, so those two are named for consistency rather than from evidence.
 
 ## Tests
 
@@ -446,27 +737,72 @@ real board ever disagrees.
 python3 -m unittest test_ipacconf.py
 ```
 
-163 tests, no hardware required. Four groups matter most:
+237 tests, no hardware required. Five groups matter most:
 `decode(encode(x)) == x` byte-for-byte, which is what makes read-modify-write
 trustworthy; `TestRealBoardDump`, which checks the pin table against a capture
 from an actual board — every pin decoding to its factory MAME default is
 strong evidence the indices are right; `TestResolveSaved`, which is the
 web UI's file-access boundary and refuses `..`, absolute paths, non-JSON names
-and symlinks pointing out of the directory; and `TestKeycodeTable`, which is
+and symlinks pointing out of the directory; `TestKeycodeTable`, which is
 what the input monitor stands on — it asserts no two keys reverse to the same
 action, since a collision there would name a pin that is not the one being
-pressed.
+pressed; and `TestAnalyseCapture`, which runs the capture analyser against a
+synthetic tshark dump, so the "every message has a header" mistake cannot come
+back and bury the one message a capture exists to find.
 
 ## Next
 
-**Mode switching from the CLI and UI.** The command is not public and is not in
-either open-source implementation. Get it by capturing WinIPAC doing *File →
-Force Board Reconfiguration* — switch to Dinput and back to keyboard in one
-recording, so both directions can be diffed against each other. Look for a
-`SET_REPORT` whose header byte is neither `0x50` (write) nor `0x59` (read).
-Gate any Xinput switch behind a confirmation until a config read is confirmed
-to work in Xinput: if it does not, that is the one switch the tool cannot
-undo.
+**Confirm the reconfigure bit changes a mode.** The capture says byte 3 bit 1
+is what *Force Board Reconfiguration* sets, but the recorded session never
+changed mode, so the bit was never seen to *do* anything. The test: from
+keyboard mode, apply a gamepad profile twice —
+
+```sh
+ipacconf.py apply gamepad.json                 # expect: no re-enumeration
+ipacconf.py apply gamepad.json --reconfigure   # expect: board re-enumerates
+lsusb | grep -iE "d209|045e:028e"
+```
+
+If the second one moves the board and the first does not, the inference is
+confirmed and the whole mode-switching problem is solved from software.
+
+**Record the whole hotkey → product id table.** Still open: `P1SW4` is documented as Dinput and was observed producing Xinput, so
+the mapping cannot be trusted from the documentation at all. It is a ten
+minute job, and it settles several other questions at once. From keyboard
+mode, for each of `P1SW2`..`P1SW5`:
+
+```sh
+# hold Start1 + P1SWn for ten seconds, count the led flashes, then:
+lsusb | grep -iE "d209|045e:028e"
+ipacconf.py list
+ipacconf.py dump -o /tmp/mode-n.json     # only where a config node exists
+# back to a known state before the next one:
+# hold Start1+P1SW1 for ten seconds
+```
+
+Three things fall out of it:
+
+1. Which hotkey actually reaches a **Dinput** mode that this tool can write.
+2. Whether mode 2 and mode 4 report different product ids. If they do,
+   `IPAC2_MODES` can name the exact mode instead of the device class.
+3. Whether a dump taken in a **user set** gamepad mode matches what was last
+   written. If it does, the "stale Dinput read" note retires for good.
+
+**Test the automatic mode switch.** Write a *genuinely* gamepad-only config in
+keyboard mode — every pin including the sticks, and every alternate action
+cleared — and watch `lsusb`. If the board re-enumerates on its own, the
+automatic switch works and there is no missing command. Note this also
+disarms the mode hotkeys, so plan on the `P1SW1`-on-power-up route back.
+
+**Mode switching from the CLI and UI.** Only if (2) fails. The command is not
+public and is not in either open-source implementation. Get it by capturing
+WinIPAC doing *File → Force Board Reconfiguration* — switch to Dinput and back
+to keyboard in one recording, so both directions can be diffed against each
+other. Look for a `SET_REPORT` whose header byte is neither `0x50` (write) nor
+`0x59` (read). Try the trailing `0x59 0xdd 0x0f` from the JPAC path first; it
+is one message and it is already in someone else's source. Gate any Xinput
+switch behind a confirmation until a config read is confirmed to work in
+Xinput: if it does not, that is the one switch the tool cannot undo.
 
 ## Status
 

@@ -57,11 +57,26 @@ class TestCodeTable(unittest.TestCase):
         self.assertEqual(ic.code_to_name(0), ic.NONE)
         self.assertEqual(ic.name_to_code(""), 0)
 
-    def test_gamepad_codes_cover_the_documented_range(self):
-        self.assertEqual(ic.ALL_CODES["GAMEPAD 1"], 0x90)
-        self.assertEqual(ic.ALL_CODES["GAMEPAD 32"], 0xAF)
+    def test_gamepad_codes_start_where_the_board_says(self):
+        """0x8e, not QtPyUltimarc's 0x90.
+
+        Confirmed against a board through WinIPAC: 0x8e reads as "P1 Button 1
+        (A)" and 0x92 as "P1 Button 5 (LR)". Two points four apart on both
+        scales, so the origin is 0x8e.
+        """
+        self.assertEqual(ic.ALL_CODES["GAMEPAD 1"], 0x8E)
+        self.assertEqual(ic.ALL_CODES["GAMEPAD 5"], 0x92)
         self.assertEqual(ic.ALL_CODES["HAT 0"], 0xBA)
         self.assertEqual(ic.ALL_CODES["ANALOG 0"], 0xB0)
+
+    def test_the_gamepad_range_stops_where_analog_starts(self):
+        top = ic.ALL_CODES["GAMEPAD %d" % ic.GAMEPAD_COUNT]
+        self.assertEqual(top + 1, ic.ALL_CODES["ANALOG 0"])
+
+    def test_no_gamepad_code_collides_with_a_named_control(self):
+        """The old numbering left 0x8e and 0x8f nameless; nothing else moved."""
+        for name in ("POWER", "SLEEP", "WAKE", "VOL UP", "VOL DOWN"):
+            self.assertLess(ic.ALL_CODES[name], ic.GAMEPAD_FIRST_CODE)
 
 
 class TestEncodeDecode(unittest.TestCase):
@@ -183,14 +198,68 @@ class TestConfigBits(unittest.TestCase):
             self.assertIs(ic.decode_config(bytes(raw))["paclink"], value)
 
     def test_debounce_leaves_other_bits_alone(self):
+        """Other than the reconfigure bit, which is stated, never inherited."""
         base = bytearray(ic.default_config())
         base[3] = 0xFF
         raw = ic.encode_config({"debounce": "none"}, bytes(base))
-        self.assertEqual(raw[3] & ~0x18, 0xFF & ~0x18)
+        untouched = ~(0x18 | ic.RECONFIGURE_BIT)
+        self.assertEqual(raw[3] & untouched, 0xFF & untouched)
 
     def test_unknown_debounce_is_rejected(self):
         with self.assertRaises(ic.ProtocolError):
             ic.encode_config({"debounce": "quick"}, ic.default_config())
+
+
+class TestReconfigureBit(unittest.TestCase):
+    """Bit 1 of the config bitfield.
+
+    Captured from WinIPAC on a 1.55 board: an ordinary write after a pin
+    change sends byte 3 as 0x00, and File -> Force Board Reconfiguration sends
+    the identical 260 bytes with byte 3 as 0x02. Nothing else differed.
+    """
+
+    def test_it_is_bit_one(self):
+        self.assertEqual(ic.RECONFIGURE_BIT, 0x02)
+
+    def test_off_by_default(self):
+        raw = ic.encode_config({}, ic.default_config())
+        self.assertEqual(raw[3] & ic.RECONFIGURE_BIT, 0)
+
+    def test_set_when_asked(self):
+        raw = ic.encode_config({}, ic.default_config(), reconfigure=True)
+        self.assertEqual(raw[3] & ic.RECONFIGURE_BIT, ic.RECONFIGURE_BIT)
+
+    def test_never_inherited_from_the_board(self):
+        """Otherwise every write after one reconfiguration is another one."""
+        base = bytearray(ic.default_config())
+        base[3] |= ic.RECONFIGURE_BIT
+        raw = ic.encode_config({}, bytes(base))
+        self.assertEqual(raw[3] & ic.RECONFIGURE_BIT, 0)
+
+    def test_restore_controls_it_too(self):
+        base = bytearray(ic.default_config())
+        base[3] |= ic.RECONFIGURE_BIT
+        self.assertEqual(ic.as_write_command(bytes(base))[3] & ic.RECONFIGURE_BIT, 0)
+        self.assertEqual(
+            ic.as_write_command(bytes(base), reconfigure=True)[3] & ic.RECONFIGURE_BIT,
+            ic.RECONFIGURE_BIT,
+        )
+
+    def test_it_does_not_disturb_debounce_or_paclink(self):
+        profile = {"debounce": "long", "paclink": True}
+        plain = ic.encode_config(profile, ic.default_config())
+        armed = ic.encode_config(profile, ic.default_config(), reconfigure=True)
+        self.assertEqual(plain[3] | ic.RECONFIGURE_BIT, armed[3])
+        self.assertEqual(ic.decode_config(bytes(armed))["debounce"], "long")
+        self.assertTrue(ic.decode_config(bytes(armed))["paclink"])
+
+    def test_it_is_the_only_difference_in_the_whole_block(self):
+        """WinIPAC's two downloads differed in exactly one byte."""
+        base = ic.default_config()
+        plain = bytes(ic.encode_config({}, base))
+        armed = bytes(ic.encode_config({}, base, reconfigure=True))
+        differ = [i for i in range(ic.CONFIG_SIZE) if plain[i] != armed[i]]
+        self.assertEqual(differ, [3])
 
 
 class TestMacros(unittest.TestCase):
@@ -270,8 +339,16 @@ class TestWriteFrames(unittest.TestCase):
     def test_first_frame_carries_the_write_header(self):
         self.assertEqual(tuple(self.frames[0][1:4]), ic.HEADER_WRITE)
 
-    def test_the_padding_is_zeros(self):
-        self.assertEqual(self.frames[-1][1:], b"\x00" * ic.CHUNK)
+    def test_the_tail_is_a_read_header_not_padding(self):
+        """Captured from WinIPAC: its downloads end 59 dd 0f 00."""
+        self.assertEqual(self.frames[-1][1:], bytes(ic.HEADER_READ))
+        self.assertEqual(ic.WRITE_TAIL, bytes(ic.HEADER_READ))
+
+    def test_the_tail_does_not_eat_config(self):
+        """All 256 config bytes still arrive; the tail is past them."""
+        sent = ic.deframe(b"".join(self.frames))
+        self.assertEqual(sent[:ic.CONFIG_SIZE], ic.default_config())
+        self.assertEqual(sent[ic.CONFIG_SIZE:], ic.WRITE_TAIL)
 
     def test_the_config_survives_the_framing(self):
         config = ic.default_config()
@@ -561,6 +638,450 @@ class TestFlashWriteBlocked(unittest.TestCase):
         info = ic.DeviceInfo("/dev/hidraw0", ic.VENDOR_PRE2015,
                              ic.PRODUCT_PRE2015, 0x0100, 2, "1-1")
         self.assertIsNone(ic.flash_write_blocked(info))
+
+
+class TestAnalyseCapture(unittest.TestCase):
+    """The capture analyser, against a synthetic tshark dump.
+
+    The bug this locks out: only the first message of a burst carries a
+    header byte. Reading byte 1 of all 65 messages of a download as a header
+    reported sixteen candidate commands, burying the one real one.
+    """
+
+    @classmethod
+    def setUpClass(cls):
+        here = os.path.dirname(os.path.abspath(__file__))
+        if not os.path.exists(os.path.join(here, "analyse_capture.py")):
+            raise unittest.SkipTest("analyse_capture.py not present")
+        import analyse_capture
+        cls.ac = analyse_capture
+
+    def _csv(self, bursts, address=7, usbmon=False):
+        """bursts: list of (list-of-payloads). Three seconds between them.
+
+        `address` may be a list, one entry per burst, to model the board
+        re-enumerating. `usbmon` emits each URB twice, submit and complete,
+        which is what a Linux host capture actually looks like.
+        """
+        import csv as _csv
+        rows, n, t, urb = [], 0, 0.0, 0x1000
+        for index, burst in enumerate(bursts):
+            addr = address[index] if isinstance(address, list) else address
+            t += 3.0
+            for payload in burst:
+                urb += 8
+                for _ in range(2 if usbmon else 1):
+                    n += 1
+                    t += 0.002
+                    rows.append({
+                        "frame.number": n,
+                        "frame.time_relative": "%.6f" % t,
+                        "usb.device_address": str(addr),
+                        "usb.urb_id": "0x%x" % urb,
+                        "usb.setup.wIndex": "2",
+                        "usb.capdata": ":".join("%02x" % b for b in payload),
+                    })
+        fh = tempfile.NamedTemporaryFile("w", suffix=".csv", delete=False, newline="")
+        self.addCleanup(os.unlink, fh.name)
+        writer = _csv.DictWriter(fh, fieldnames=list(rows[0]))
+        writer.writeheader()
+        writer.writerows(rows)
+        fh.close()
+        return fh.name
+
+    def _raw_csv(self, rows):
+        """Write exactly these rows, for testing the capture diagnostics."""
+        import csv as _csv
+        fh = tempfile.NamedTemporaryFile("w", suffix=".csv", delete=False, newline="")
+        self.addCleanup(os.unlink, fh.name)
+        writer = _csv.DictWriter(fh, fieldnames=list(rows[0]))
+        writer.writeheader()
+        writer.writerows(rows)
+        fh.close()
+        return fh.name
+
+    @staticmethod
+    def _download(tail=b"\x00\x00\x00\x00"):
+        buf = bytearray(ic.CONFIG_SIZE)
+        buf[0], buf[1], buf[2] = ic.HEADER_WRITE
+        padded = bytes(buf) + tail
+        return [bytes([3]) + padded[p:p + 4] for p in range(0, 260, 4)]
+
+    def test_a_download_is_one_burst_with_one_header(self):
+        path = self._csv([self._download()])
+        blocks = self.ac.group_blocks(self.ac.read_messages(path))
+        self.assertEqual(len(blocks), 1)
+        self.assertEqual(len(blocks[0]), 65)
+        self.assertEqual(blocks[0][0].header, 0x50)
+
+    def test_a_download_does_not_produce_candidates(self):
+        """Byte 1 of a config message is data, not a header."""
+        path = self._csv([self._download()])
+        blocks = self.ac.group_blocks(self.ac.read_messages(path))
+        unknown = [b for b in blocks if b[0].header not in self.ac.KNOWN_HEADERS]
+        self.assertEqual(unknown, [])
+
+    def test_an_unknown_single_message_is_a_candidate(self):
+        path = self._csv([
+            [bytes([3, 0x59, 0xdd, 0x0f, 0x00])],
+            self._download(),
+            [bytes([3, 0x5B, 0xdd, 0x04, 0x00])],
+        ])
+        blocks = self.ac.group_blocks(self.ac.read_messages(path))
+        self.assertEqual([b[0].header for b in blocks], [0x59, 0x50, 0x5B])
+        unknown = [b for b in blocks if b[0].header not in self.ac.KNOWN_HEADERS]
+        self.assertEqual(len(unknown), 1)
+        self.assertEqual(unknown[0][0].payload, bytes([3, 0x5B, 0xdd, 0x04, 0x00]))
+
+    def test_the_trailing_four_bytes_are_recovered(self):
+        """The open question about bytes 256-259 of a download."""
+        path = self._csv([self._download(tail=bytes([0x59, 0xdd, 0x0F, 0x00]))])
+        block = self.ac.group_blocks(self.ac.read_messages(path))[0]
+        data = self.ac.reassemble(block)
+        self.assertEqual(len(data), 260)
+        self.assertEqual(data[256:260], bytes([0x59, 0xdd, 0x0F, 0x00]))
+
+    def test_non_config_traffic_is_ignored(self):
+        """Anything that is not a five byte report-id-3 message is not ours."""
+        path = self._csv([[bytes([0x01, 0x00, 0x00]), bytes([3, 0x59, 0xdd, 0x0F, 0x00])]])
+        messages = self.ac.read_messages(path)
+        self.assertEqual(len(messages), 1)
+
+    def test_an_address_filter_excludes_other_devices(self):
+        path = self._csv([[bytes([3, 0x59, 0xdd, 0x0F, 0x00])]])
+        self.assertEqual(len(self.ac.read_messages(path, {7})), 1)
+        self.assertEqual(len(self.ac.read_messages(path, {9})), 0)
+
+    def test_usbmon_submit_and_complete_count_once(self):
+        """usbmon logs every transfer twice; 65 messages must not become 130."""
+        path = self._csv([self._download()], usbmon=True)
+        messages = self.ac.read_messages(path)
+        self.assertEqual(len(messages), 65)
+        blocks = self.ac.group_blocks(messages)
+        self.assertEqual(len(blocks), 1)
+        self.assertEqual(blocks[0][0].header, 0x50)
+
+    def test_the_trailing_bytes_survive_deduplication(self):
+        path = self._csv([self._download(tail=bytes([0x59, 0xdd, 0x0F, 0x00]))],
+                         usbmon=True)
+        block = self.ac.group_blocks(self.ac.read_messages(path))[0]
+        self.assertEqual(self.ac.reassemble(block)[256:260],
+                         bytes([0x59, 0xdd, 0x0F, 0x00]))
+
+    def test_a_mode_switch_shows_as_a_new_device_address(self):
+        """The board re-enumerates, so a capture of a switch spans addresses."""
+        path = self._csv(
+            [[bytes([3, 0x5B, 0xdd, 0x04, 0x00])],
+             [bytes([3, 0x59, 0xdd, 0x0F, 0x00])]],
+            address=[12, 14], usbmon=True,
+        )
+        messages = self.ac.read_messages(path)
+        self.assertEqual([m.address for m in messages], [12, 14])
+
+    def test_the_boards_answers_are_recovered(self):
+        """Responses arrive as HID data on 0x84, not in any usb.* payload field.
+
+        Missing them costs the most useful thing in a capture: consecutive
+        reads diff down to the exact byte a write moved.
+        """
+        rows = []
+        for index, fill in enumerate((0x11, 0x22)):
+            config = bytes([0x50, 0xDD, 0x55, 0x00]) + bytes([fill]) * 252
+            for pos in range(0, 256, 4):
+                rows.append({
+                    "frame.number": str(len(rows) + 1),
+                    "usb.endpoint_address": "0x84",
+                    "usbhid.data": ":".join(
+                        "%02x" % b for b in bytes([3]) + config[pos:pos + 4]),
+                })
+        path = self._raw_csv(rows)
+        configs = self.ac.read_responses(path)
+        self.assertEqual(len(configs), 2)
+        self.assertEqual(len(configs[0]), 256)
+        self.assertEqual(configs[0][:4], bytes([0x50, 0xDD, 0x55, 0x00]))
+        self.assertEqual(configs[0][4], 0x11)
+        self.assertEqual(configs[1][4], 0x22)
+
+    def test_traffic_on_other_endpoints_is_not_a_response(self):
+        rows = [{
+            "frame.number": "1",
+            "usb.endpoint_address": "0x02",
+            "usbhid.data": "03:50:dd:55:00",
+        }]
+        self.assertEqual(self.ac.read_responses(self._raw_csv(rows)), [])
+
+    def test_consecutive_reads_diff_to_the_changed_byte(self):
+        a = bytes(256)
+        b = bytearray(a)
+        b[44] = 0x92
+        changes = self.ac.diff_responses([a, bytes(b)])
+        self.assertEqual(changes, [(0, 44, 0x00, 0x92)])
+
+    def test_identical_reads_diff_to_nothing(self):
+        a = bytes(256)
+        self.assertEqual(self.ac.diff_responses([a, a]), [])
+
+    def test_an_empty_capture_says_so(self):
+        """Nothing recorded is a capture fault, not a filtering one."""
+        path = self._raw_csv([{"frame.number": "1", "usb.bus_id": "1",
+                               "usb.device_address": "4", "usb.capdata": ""}])
+        text = self.ac.describe_capture(path)
+        self.assertIn("caught no traffic at all", text)
+
+    def test_traffic_from_other_devices_says_so(self):
+        """Payloads present but none five bytes means the wrong bus."""
+        path = self._raw_csv([
+            {"frame.number": "1", "usb.bus_id": "1",
+             "usb.device_address": "4", "usb.capdata": "01:02:03:04:05:06:07:08"},
+            {"frame.number": "2", "usb.bus_id": "2",
+             "usb.device_address": "9", "usb.capdata": "aa:bb"},
+        ])
+        text = self.ac.describe_capture(path)
+        self.assertIn("none of it is a five byte message", text)
+        self.assertNotIn("caught no traffic at all", text)
+
+    def test_the_description_lists_buses_and_addresses(self):
+        """So a wrong-bus capture can be turned into a right-bus one."""
+        path = self._raw_csv([
+            {"frame.number": "1", "usb.bus_id": "3",
+             "usb.device_address": "11", "usb.capdata": "03:59:dd:0f:00"},
+        ])
+        text = self.ac.describe_capture(path)
+        self.assertIn("usb buses:     3", text)
+        self.assertIn("11", text)
+
+    def test_filtering_on_one_address_loses_the_other_half(self):
+        """Why --address takes a list: a single value hides the switch."""
+        path = self._csv(
+            [[bytes([3, 0x5B, 0xdd, 0x04, 0x00])],
+             [bytes([3, 0x59, 0xdd, 0x0F, 0x00])]],
+            address=[12, 14],
+        )
+        self.assertEqual(len(self.ac.read_messages(path, {12})), 1)
+        self.assertEqual(len(self.ac.read_messages(path, {12, 14})), 2)
+
+
+class TestModeHotkeys(unittest.TestCase):
+    """Five modes, and only three of them act on the config.
+
+    Getting this wrong is not cosmetic: Start1+P1SW2 reaches mode 2, the
+    Dinput *preset*, which runs a fixed internal map. A profile written and
+    then checked in mode 2 looks like the write was ignored, because as far
+    as that mode is concerned it was.
+    """
+
+    def test_there_are_five(self):
+        self.assertEqual([m[0] for m in ic.MODE_HOTKEYS], [1, 2, 3, 4, 5])
+
+    def test_the_hotkey_matches_the_mode_number(self):
+        for number, button, _, _, _ in ic.MODE_HOTKEYS:
+            self.assertEqual(button, "P1SW%d" % number)
+
+    def test_the_preset_modes_do_not_use_the_config(self):
+        presets = {n for n, _, _, uses, _ in ic.MODE_HOTKEYS if not uses}
+        self.assertEqual(presets, {2, 3})
+
+    def test_the_user_set_modes_do(self):
+        user_set = {n for n, _, _, uses, _ in ic.MODE_HOTKEYS if uses}
+        self.assertEqual(user_set, {1, 4, 5})
+
+    def test_observed_ids_are_recorded_where_we_have_them(self):
+        seen = {n: pid for n, _, _, _, pid in ic.MODE_HOTKEYS if pid}
+        self.assertEqual(seen, {1: "d209:0420", 4: "045e:028e"})
+
+    def test_mode_4_is_marked_contested(self):
+        """It is documented as Dinput and observed as Xinput. Say so."""
+        self.assertIn(4, ic.MODE_HOTKEY_CONFLICTS)
+        self.assertIn("045e:028e", ic.MODE_HOTKEY_CONFLICTS[4])
+
+    def test_a_contested_hotkey_is_one_the_tool_does_not_recommend(self):
+        """Nothing should send someone to a hotkey we have seen misbehave.
+
+        The Dinput warning used to end "switch back with Start1+P1SW4",
+        which on a 1.55 board lands in Xinput - a mode with no config
+        interface at all.
+        """
+        info = ic.DeviceInfo("/dev/hidraw0", ic.VENDOR_2015, 0x0421, 0x0055, 2, "1-1")
+        reason = ic.flash_write_blocked(info)
+        self.assertNotIn("switch back with Start1+P1SW4", reason)
+        self.assertNotIn("switch back with Start1+P1SW2", reason)
+        self.assertIn("check with `list`", reason)
+
+
+class TestConfigKind(unittest.TestCase):
+    """What the board will make of a download.
+
+    Multi-mode firmware picks its mode from the content of what it is sent,
+    so this decides whether an apply moves the board or leaves it where it
+    is. The mixed case is the one that bites.
+    """
+
+    @staticmethod
+    def _raw(actions):
+        """A config with exactly these pins assigned and nothing else."""
+        buf = bytearray(ic.CONFIG_SIZE)
+        buf[0], buf[1], buf[2] = ic.HEADER_WRITE
+        for name, action in actions.items():
+            index = ic.PIN_TABLE[name][0]
+            buf[4 + index] = ic.name_to_code(action)
+        return bytes(buf)
+
+    def test_keyboard_only(self):
+        self.assertEqual(ic.config_kind(self._raw({"1sw1": "A", "1sw2": "B"})), "keyboard")
+
+    def test_gamepad_only(self):
+        raw = self._raw({"1sw1": "GAMEPAD 1", "1up": "HAT 1", "2sw1": "ANALOG 1"})
+        self.assertEqual(ic.config_kind(raw), "gamepad")
+
+    def test_one_keycode_makes_it_mixed(self):
+        raw = self._raw({"1sw1": "GAMEPAD 1", "1up": "UP"})
+        self.assertEqual(ic.config_kind(raw), "mixed")
+
+    def test_an_alternate_action_counts(self):
+        """The shifted code is part of the download, so it decides too."""
+        buf = bytearray(self._raw({"1sw1": "GAMEPAD 1"}))
+        buf[4 + ic.PIN_TABLE["1sw1"][1]] = ic.name_to_code("5")
+        self.assertEqual(ic.config_kind(bytes(buf)), "mixed")
+
+    def test_an_empty_config_has_no_opinion(self):
+        self.assertEqual(ic.config_kind(bytes(ic.CONFIG_SIZE)), "mixed")
+
+
+class TestGamepadTemplateIsMixed(unittest.TestCase):
+    """The shipped gamepad template cannot trigger the automatic switch.
+
+    It assigns the buttons but not the stick pins, and never clears the
+    alternate actions - so applied to a factory board the download still
+    carries keycodes and the board stays in keyboard mode. This is the
+    regression net for the thing that made a correct write look ignored.
+    """
+
+    @classmethod
+    def setUpClass(cls):
+        here = os.path.dirname(os.path.abspath(__file__))
+        fixture = os.path.join(here, "fixtures", "ipac2-1.55-keyboard.json")
+        template = os.path.join(here, "profiles", "batocera-gamepad.template.json")
+        for path in (fixture, template):
+            if not os.path.exists(path):
+                raise unittest.SkipTest("missing %s" % path)
+        cls.base = bytes.fromhex(ic.load_profile(fixture)["raw"])
+        cls.template = ic.load_profile(template)
+
+    def test_the_factory_board_is_keyboard_only(self):
+        self.assertEqual(ic.config_kind(self.base), "keyboard")
+
+    def test_the_template_over_it_is_mixed(self):
+        raw = bytes(ic.encode_config(self.template, self.base))
+        self.assertEqual(ic.config_kind(raw), "mixed")
+
+    def test_and_the_note_says_why(self):
+        raw = bytes(ic.encode_config(self.template, self.base))
+        info = ic.DeviceInfo("/dev/hidraw0", ic.VENDOR_2015,
+                             ic.PRODUCT_IPAC2, 0x0055, 2, "1-1")
+        note = ic.mode_switch_note(raw, info)
+        self.assertIn("mixes keyboard and gamepad", note)
+
+
+class TestHotkeyWarning(unittest.TestCase):
+    """A gamepad profile can disarm the escape hatch it needs you to use.
+
+    Confirmed on hardware: after the gamepad template was written, the only
+    thing that still worked was holding P1SW1 while plugging in usb. The six
+    pins the mode hotkeys use had all been assigned gamepad actions, which do
+    nothing while the board is in keyboard mode.
+    """
+
+    @staticmethod
+    def _raw(actions, shift="1start"):
+        buf = bytearray(ic.CONFIG_SIZE)
+        buf[0], buf[1], buf[2] = ic.HEADER_WRITE
+        for name in ic.PIN_ORDER:
+            buf[4 + ic.PIN_TABLE[name][2]] = 0x01
+        if shift:
+            buf[4 + ic.PIN_TABLE[shift][2]] = 0x01 | ic.SHIFT_BIT
+        for name, action in actions.items():
+            buf[4 + ic.PIN_TABLE[name][0]] = ic.name_to_code(action)
+        return bytes(buf)
+
+    def test_keycodes_on_the_hotkey_pins_are_fine(self):
+        raw = self._raw({"1start": "1", "1sw1": "CTRL L", "1sw4": "SHIFT L"})
+        self.assertIsNone(ic.hotkey_warning(raw))
+
+    def test_a_gamepad_shift_key_is_flagged(self):
+        raw = self._raw({"1start": "GAMEPAD 9"})
+        self.assertIn("1start", ic.hotkey_warning(raw))
+
+    def test_a_gamepad_mode_selector_is_flagged(self):
+        raw = self._raw({"1sw4": "GAMEPAD 4"})
+        self.assertIn("1sw4", ic.hotkey_warning(raw))
+
+    def test_no_shift_key_at_all_is_flagged(self):
+        warning = ic.hotkey_warning(self._raw({}, shift=None))
+        self.assertIn("no I-PAC shift key", warning)
+
+    def test_the_warning_names_the_way_out(self):
+        warning = ic.hotkey_warning(self._raw({"1start": "GAMEPAD 9"}))
+        self.assertIn("plugging in usb", warning)
+
+    def test_a_pin_outside_the_hotkeys_is_not_flagged(self):
+        self.assertIsNone(ic.hotkey_warning(self._raw({"2sw8": "GAMEPAD 8"})))
+
+
+class TestShippedProfilesAgainstTheHotkeys(unittest.TestCase):
+    """The template disarms the hotkeys; the MAME profile puts them back."""
+
+    @classmethod
+    def setUpClass(cls):
+        here = os.path.dirname(os.path.abspath(__file__))
+        fixture = os.path.join(here, "fixtures", "ipac2-1.55-keyboard.json")
+        if not os.path.exists(fixture):
+            raise unittest.SkipTest("no board dump present")
+        cls.base = bytes.fromhex(ic.load_profile(fixture)["raw"])
+        cls.here = here
+
+    def _encoded(self, name):
+        path = os.path.join(self.here, "profiles", name)
+        if not os.path.exists(path):
+            self.skipTest("missing %s" % name)
+        return bytes(ic.encode_config(ic.load_profile(path), self.base))
+
+    def test_the_factory_config_keeps_the_hotkeys(self):
+        self.assertIsNone(ic.hotkey_warning(self.base))
+
+    def test_the_gamepad_template_warns(self):
+        warning = ic.hotkey_warning(self._encoded("batocera-gamepad.template.json"))
+        self.assertIsNotNone(warning)
+        for pin in ("1start", "1sw1", "1sw4"):
+            self.assertIn(pin, warning)
+
+    def test_the_mame_profile_does_not(self):
+        self.assertIsNone(ic.hotkey_warning(self._encoded("mame-keyboard.json")))
+
+
+class TestModeSwitchNote(unittest.TestCase):
+
+    @staticmethod
+    def _info(product):
+        return ic.DeviceInfo("/dev/hidraw0", ic.VENDOR_2015, product, 0x0055, 2, "1-1")
+
+    @staticmethod
+    def _raw(action):
+        buf = bytearray(ic.CONFIG_SIZE)
+        buf[0], buf[1], buf[2] = ic.HEADER_WRITE
+        for name in ic.PIN_ORDER:
+            buf[4 + ic.PIN_TABLE[name][0]] = ic.name_to_code(action)
+        return bytes(buf)
+
+    def test_gamepad_download_in_keyboard_mode_predicts_mode_4(self):
+        note = ic.mode_switch_note(self._raw("GAMEPAD 1"), self._info(0x0420))
+        self.assertIn("mode 4", note)
+
+    def test_keyboard_download_in_gamepad_mode_predicts_mode_1(self):
+        note = ic.mode_switch_note(self._raw("A"), self._info(0x0421))
+        self.assertIn("keyboard mode 1", note)
+
+    def test_nothing_to_say_when_the_mode_already_matches(self):
+        self.assertIsNone(ic.mode_switch_note(self._raw("A"), self._info(0x0420)))
 
 
 class TestDumpRecordsMode(unittest.TestCase):

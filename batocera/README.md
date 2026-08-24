@@ -162,18 +162,42 @@ profile with the directions on `HAT 1` — in keyboard mode — then switch to
 Dinput:
 
 ```sh
-# hold Start1+P1SW1 ten seconds -> keyboard
+# hold Start1+P1SW1 ten seconds -> keyboard (mode 1)
 ipacconf.py apply /userdata/system/ipac-config/profiles/your-gamepad.json
-# hold Start1+P1SW2 ten seconds -> Dinput
+# hold Start1+P1SW4 ten seconds -> Dinput, mode 4
 ```
+
+**Which hotkey to use is not settled.** There are five modes on 1.50+
+firmware. `P1SW2` reaches mode 2, the Dinput *preset*, which runs a fixed
+internal map and ignores the config block entirely — a profile checked there
+looks like it was never written. `P1SW4` is documented as mode 4, the Dinput
+mode that uses your config, but on a 1.55 board it was observed producing
+`045e:028e` — Xinput, which has no config interface at all. Switch, then run
+`ipacconf.py list` before assuming where you landed. `Start1+P1SW1` or holding
+`P1SW1` while plugging in USB always gets you back.
 
 `dump` does not report the live config while in Dinput, so check your work in
 keyboard mode or by behaviour, not by dumping in Dinput.
+
+**A gamepad profile can disarm the mode hotkeys.** Start1+P1SW1-5 needs those
+six pins to be doing something the board's current mode understands, and a
+gamepad profile puts `GAMEPAD` actions on all six — which are inert in
+keyboard mode. Written in keyboard mode, such a profile leaves no working
+hotkey to reach the gamepad mode it was written for. The way back is holding
+`P1SW1` while plugging in the USB cable, which ignores the config entirely.
+`apply` warns before writing anything that would do this.
 
 **One caveat on persistence.** That only holds for a write made in keyboard mode. In Dinput
 the board takes the write, acts on it, and never commits it — so the config
 looks right until the next power cycle and then reverts. `apply` refuses to
 write in Dinput for this reason. If you want the board in Dinput, switch to
 keyboard (`Start1+P1SW1`, ten seconds), write, then switch back with
-`Start1+P1SW2`; the mode is not part of the config, so the switch back leaves
+`Start1+P1SW4`; the mode is not part of the config, so the switch back leaves
 your profile alone.
+
+`apply` also reports which way it expects the mode to go. The board chooses
+its mode from what it is sent — an all-keyboard download puts it in mode 1, an
+all-gamepad one in mode 4 — but a download mixing the two leaves the mode
+alone. Pins your profile does not assign, and alternate (shifted) actions it
+does not clear, keep whatever the board already had, which is how a gamepad
+profile ends up mixed by accident.
