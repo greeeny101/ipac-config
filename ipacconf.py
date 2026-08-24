@@ -85,36 +85,43 @@ MODE_KEYBOARD = "keyboard"
 # mode 2, where the stock map is what the board is genuinely running.
 #
 # Source: the Multi-Mode tab on Ultimarc's I-PAC 2 product page - with one
-# entry contradicted on hardware, see MODE_HOTKEY_CONFLICTS. The fourth field
-# is whether the mode acts on the config; the fifth is what a board was
-# actually observed to enumerate as, or None where nobody has looked yet.
+# entry confirmed on hardware. The fourth field is whether the mode acts on
+# the config; the fifth is what a board was actually observed to enumerate as,
+# or None where nobody has looked yet.
 MODE_HOTKEYS = [
     (1, "P1SW1", "keyboard", True, "d209:0420"),
     (2, "P1SW2", "Dinput preset", False, None),
     (3, "P1SW3", "Xinput preset", False, None),
-    (4, "P1SW4", "Dinput user set", True, "045e:028e"),
+    (4, "P1SW4", "Dinput user set", True, "d209:0421"),
     (5, "P1SW5", "Xinput user set", True, None),
 ]
 
-# Observed on firmware 1.55: Start1+P1SW4 flashes the led four times, so the
-# board agrees it selected mode 4, and then enumerates as 045e:028e - the
-# Xbox 360 pad identity, which is Xinput. Ultimarc document mode 4 as Dinput
-# User Set, and their own custom-Xinput recipe says to use Start1+P1SW4 to get
-# *back* to Dinput. Both cannot be true.
+# Mode 4 is Dinput, as Ultimarc document. Confirmed on a 1.55 board: the led
+# flashes four times and it comes up d209:0421.
 #
-# Not resolved. It matters because Xinput exposes no hid interface, so a hotkey
-# advertised as "the gamepad mode you can still configure" instead lands the
-# board somewhere this tool cannot reach it at all. Until the full hotkey ->
-# product id table is recorded on hardware, mode 4 is described as contested
-# rather than as Dinput.
-MODE_HOTKEY_CONFLICTS = {
-    4: (
-        "Start1+P1SW4 is documented as Dinput (mode 4) but was observed to "
-        "put a 1.55 board into Xinput (045e:028e), where there is no config "
-        "interface. Check `list` after switching, and be ready to come back "
-        "with Start1+P1SW1 or by holding P1SW1 while plugging in usb."
-    ),
-}
+# An earlier run of the SAME hotkey on the SAME board produced 045e:028e -
+# Xinput - and that was recorded here as a contradiction. It was not. What
+# differed was the config the board was holding, so the mode a hotkey reaches
+# is not a property of the hotkey alone.
+#
+# Two things changed between the two runs, and only one of them can be the
+# cause:
+#
+#   1. The config went from a mostly-keyboard map to a gamepad-only one.
+#   2. Byte 3 went from 0x02 to 0x00 - RECONFIGURE_BIT, left set in flash by
+#      WinIPAC's Force Board Reconfiguration.
+#
+# (2) is the better fit, because Ultimarc's *only* documented use of Force
+# Board Reconfiguration is their recipe for building a custom Xinput map:
+# "Save the file as an Xinput configuration. Click File, Force Board
+# Reconfiguration. The board should switch to Xinput mode using the custom
+# configuration." That reads as the bit meaning "this config is an Xinput
+# one", not "apply this now".
+#
+# Untested: the two changed together, so this is a hypothesis with a confound,
+# which is exactly the shape of the last inference drawn about this bit that
+# turned out to be wrong. The isolating test is in README.md.
+MODE_HOTKEY_CONFLICTS = {}
 
 
 def looks_ultimarc(manufacturer, product_name) -> bool:
@@ -175,21 +182,38 @@ HEADER_READ = (0x59, 0xDD, 0x0F, 0x00)
 # zeros from. WinIPAC is the reference implementation, so follow WinIPAC.
 WRITE_TAIL = bytes(HEADER_READ)
 
-# Bit 1 of the config bitfield. Ultimarc-linux calls it accelerometer_uio and
-# QtPyUltimarc calls it accelerometer - a field belonging to the Ultimate I/O,
-# which is the only board in the family that has one. An I-PAC 2 does not.
+# Bit 1 of the config bitfield: "this config is an Xinput one".
 #
-# Captured from WinIPAC: an ordinary write after a pin change sends this bit
-# clear, and *File -> Force Board Reconfiguration* sends the same 260 bytes
-# with it set. Nothing else in the block differed. So on this board the bit is
-# what makes the board act on a download rather than merely store it, and the
-# open-source implementations never set it because they took the field name at
-# face value.
+# Ultimarc-linux calls it accelerometer_uio and QtPyUltimarc calls it
+# accelerometer - a field belonging to the Ultimate I/O, the only board in the
+# family that has one. An I-PAC 2 does not, and on an I-PAC 2 it selects
+# Xinput. Worked out in three steps, each of which corrected the last:
 #
-# One capture, one board, one firmware. Held as a strong inference rather than
-# a fact until a write with the bit set is confirmed to switch a mode that a
-# write without it does not.
-RECONFIGURE_BIT = 0x02
+#   1. Captured from WinIPAC: an ordinary write sends byte 3 clear, and
+#      *File -> Force Board Reconfiguration* sends the same 260 bytes with bit
+#      1 set. Read at the time as "apply this download now".
+#   2. That was wrong. Setting it did not make a 1.55 board act on a
+#      gamepad-only download, and the bit persisted in flash rather than being
+#      consumed - so it is a stored setting, not a command.
+#   3. Confirmed on hardware: writing a gamepad-only config with the bit set,
+#      from keyboard mode, takes the board to XINPUT. Batocera, watching at
+#      the time, reported a "Microsoft Xbox controller" connecting - which is
+#      045e:028e, the identity the board wears in Xinput. Holding
+#      Start1+P1SW4 then moved it to Dinput (d209:0421), and the same hotkey
+#      with the bit clear had given Dinput directly.
+#
+# Which is exactly what Ultimarc document, once the menu item is read as what
+# it is used for rather than what it is called: their only recipe involving
+# Force Board Reconfiguration is the one for building a custom Xinput map -
+# "Save the file as an Xinput configuration. Click File, Force Board
+# Reconfiguration. The board should switch to Xinput mode using the custom
+# configuration."
+#
+# It is ordinary config, so it is preserved across a read-modify-write like
+# debounce and paclink. It is also the one config bit that can make the board
+# unreachable - Xinput exposes no hid interface - so a write that would set it
+# says so first.
+XINPUT_BIT = 0x02
 
 # Bit 6 of a pin's shift byte marks it as the shift key. Real boards carry
 # 0x01 in the low bits of every pin's shift byte and 0x41 on the shift pin, so
@@ -276,15 +300,13 @@ def flash_write_blocked(info):
         "the board is in %s mode, where a write is applied but never "
         "committed to flash - it takes effect immediately and then reverts on "
         "the next power cycle.\n"
-        "Hold Start1+P1SW1 for 10s to switch to keyboard mode, then write. "
-        "The mode is not in the config block, so switching back afterwards "
-        "will not disturb what you wrote.\n"
-        "Which hotkey to switch back with is not settled. Start1+P1SW2 is "
-        "mode 2, the Dinput *preset*, which runs a fixed internal map and "
-        "ignores your config. Start1+P1SW4 is documented as mode 4, Dinput "
-        "user set - but on a 1.55 board it was observed to land in Xinput "
-        "instead, where this tool cannot reach the board at all. Switch, "
-        "then check with `list` before assuming." % info.mode
+        "Hold Start1+P1SW1 for 10s to switch to keyboard mode, write, then "
+        "switch back with Start1+P1SW4 - mode 4, Dinput user set, which is "
+        "the Dinput mode that acts on your config. Confirmed on hardware: "
+        "the led flashes four times and the board comes up d209:0421. "
+        "Start1+P1SW2 is mode 2, the Dinput *preset*, which runs a fixed "
+        "internal map and ignores what you wrote. The mode is not in the "
+        "config block, so switching back will not disturb it." % info.mode
     )
 
 
@@ -398,18 +420,133 @@ SYSTEM_CODES = {
 # ANALOG 0 begins at 0xB0, which makes 34 of them; nobody has checked whether
 # the board really has 33 and 34 or whether those two codes mean something
 # else, so they are named for consistency rather than from evidence.
+# Buttons are numbered from ZERO, because that is how the host numbers them.
+# Batocera, SDL and evdev all call the first button 0; WinIPAC calls it "P1
+# Button 1". The tool a cabinet is actually configured against wins, so
+# GAMEPAD 0 is 0x8e and GAMEPAD 10 is the last confirmed button.
+#
+# This changed. Profiles written when the names were 1-based mean one code
+# lower now - "GAMEPAD 1" was 0x8e and is 0x8f. There is no way to tell the
+# two conventions apart from the file, so hand-written profiles need checking
+# by eye. Dumps and backups are unaffected: they carry raw bytes and `restore`
+# is byte-exact.
 GAMEPAD_FIRST_CODE = 0x8E
 GAMEPAD_COUNT = 34
 
+# ...but only the first eleven are known to BE buttons.
+#
+# Confirmed on hardware, pin by pin: 0x8e..0x98 are buttons 1..11, each one
+# arriving as EV_KEY. Above that the names stop describing what happens -
+# 0x9a, 0x9b and 0x9c produce hat events (EV_ABS 0x10/0x11) and 0x9d produces
+# EV_ABS 0, an ordinary axis. A stick assigned "GAMEPAD 16" moved an axis
+# instead of pressing button 16.
+#
+# That is not a naming accident, it is how the board works: a gamepad has a
+# dozen-odd buttons and then a d-pad and axes, and the code space is laid out
+# the same way. QtPyUltimarc's table implies 32 contiguous buttons followed by
+# analog at 0xB0 and hats at 0xBA, and that is wrong for this board by a wide
+# margin - the hats turn up around 0x9a, not 0xBA.
+#
+# The range ends at 0x98. 0x99..0x9c are the d-pad - see DPAD_FIRST_CODE - and
+# above those the names are placeholders for codes rather than promises about
+# them. apply says so before writing one.
+GAMEPAD_BUTTONS_CONFIRMED = 11
+
+# The four codes immediately above the buttons, 0x99..0x9c, are the d-pad, and
+# they are in the order you would guess. MEASURED on a panel, one direction at
+# a time, reading the evdev axis and value the host raised:
+#
+#     0x99  ->  ABS_HAT0Y -1   =  UP
+#     0x9a  ->  ABS_HAT0Y +1   =  DOWN
+#     0x9b  ->  ABS_HAT0X -1   =  LEFT
+#     0x9c  ->  ABS_HAT0X +1   =  RIGHT
+#
+# (Linux convention: HAT0Y runs -1 up to +1 down, HAT0X -1 left to +1 right.)
+#
+# 0x9d is not a d-pad code; assigned to a direction it does nothing useful.
+#
+# Getting the ORDER wrong does not simply mirror the stick, it puts opposite
+# directions on different axes: up and down each moving a different one. The
+# hat then never returns to a clean centre, diagonals are impossible, and the
+# stick feels sluggish and sticky rather than plainly wrong. That symptom is
+# what this table was worked out from.
+#
+# Two earlier attempts to derive the pairing were wrong, both because the
+# axis readings came from a monitor that was mislabelling axis events. This
+# table is from the fixed monitor and the panel, not from a theory.
+#
+# QtPyUltimarc puts hats at 0xBA..0xBD and analog at 0xB0..0xB7. Neither is
+# anywhere near this.
+DPAD_FIRST_CODE = 0x99
+DPAD_COUNT = 4
+
+# The code says which CONTROLLER, not just which control.
+#
+# Confirmed on hardware. A profile that gave both players the same codes put
+# every press - player 2's included - on player 1's event node, and player 2's
+# buttons mirrored player 1's. Giving player 2 its own codes put it back on its
+# own node. So two pins carrying one code are the same button on the same
+# controller, whichever pin group they sit in.
+#
+# Player 2's block starts at 0xa7: codes 0xa8..0xab came back as player 2's
+# buttons 1..4, four consistent points, so button 0 is 0xa7. That makes each
+# player's block 25 codes:
+#
+#     player 1                     player 2
+#     0x8e..0x98  11 buttons       0xa7..0xb1   measured
+#     0x99..0x9c   4 hat           0xb2..0xb5   measured
+#     0x9d..0xa6  10 axes          0xb6..0xbf   inferred - never pressed
+#
+# Player 2's hat was predicted from the block arithmetic and then confirmed:
+# 0xb2..0xb5 fired ABS_HAT0Y -1, +1 and ABS_HAT0X -1, +1 - the same axis
+# pairing and the same up/down/left/right order as player 1's.
+#
+# And that finally explains 0x9d, which cost an evening: it is not past the
+# end of the buttons and it is not a d-pad direction. It is player 1's first
+# AXIS code, which is why assigning it to a stick direction moved ABS_X and
+# did nothing useful.
+#
+# The axis rows are arithmetic, not measurement - 25 minus 11 minus 4 is 10,
+# and 0x9d moving ABS_X is the only direct evidence for what lives there.
+PLAYER_BLOCK = 0x19  # 25 codes per controller
+P2_FIRST_CODE = GAMEPAD_FIRST_CODE + PLAYER_BLOCK
+
+DPAD_DIRECTIONS = ("UP", "DOWN", "LEFT", "RIGHT")  # in code order, measured
+
+# Named for the hat the host reports them on: the four drive ABS_HAT0X and
+# ABS_HAT0Y, which is hat 0. "HAT 0 UP" says which hat and which way; "DPAD 1"
+# said neither, and the order being wrong is the failure that actually happens.
+DPAD_NAME = "HAT 0 %s"
+
 GAME_CODES = {}
-for _n in range(1, GAMEPAD_COUNT + 1):
-    GAME_CODES["GAMEPAD %d" % _n] = GAMEPAD_FIRST_CODE + _n - 1
+# Registered before GAMEPAD so these win when a byte is decoded back to a name:
+# 0x99 is the d-pad, whatever an older profile called it. The named form wins
+# over the numbered one, because "DPAD UP" is checkable by reading it and
+# "DPAD 1" is not - and the order being wrong is the failure that actually
+# happens.
+# Player 2's block, registered first so it wins when a byte is decoded: those
+# codes are player 2 controls, not high-numbered player 1 buttons.
+for _n in range(0, GAMEPAD_BUTTONS_CONFIRMED):
+    GAME_CODES["P2 GAMEPAD %d" % _n] = P2_FIRST_CODE + _n
+for _n, _dir in enumerate(DPAD_DIRECTIONS):
+    GAME_CODES["P2 HAT %s" % _dir] = P2_FIRST_CODE + GAMEPAD_BUTTONS_CONFIRMED + _n
+
+for _n, _dir in enumerate(DPAD_DIRECTIONS):
+    GAME_CODES[DPAD_NAME % _dir] = DPAD_FIRST_CODE + _n
+# Kept so profiles written before the codes were measured still apply.
+for _n, _dir in enumerate(DPAD_DIRECTIONS):
+    GAME_CODES["DPAD %s" % _dir] = DPAD_FIRST_CODE + _n
+for _n in range(1, DPAD_COUNT + 1):
+    GAME_CODES["DPAD %d" % _n] = DPAD_FIRST_CODE + _n - 1
+for _n in range(0, GAMEPAD_COUNT):
+    GAME_CODES["GAMEPAD %d" % _n] = GAMEPAD_FIRST_CODE + _n
 for _n in range(0, 8):
-    GAME_CODES["ANALOG %d" % _n] = 0xB0 + _n
-# Upstream lists HAT 2 as 0xDC, which is out of sequence and lands in the
-# macro range; 0xBC is the obvious reading and is what we use.
-for _n in range(0, 4):
-    GAME_CODES["HAT %d" % _n] = 0xBA + _n
+    GAME_CODES["ANALOG %d" % _n] = 0xB0 + _n  # unverified; see PLAYER_BLOCK
+# QtPyUltimarc puts hats at 0xBA..0xBD. Measured, this board's hat is at
+# 0x99..0x9c - see DPAD_FIRST_CODE - so those names are not registered: they
+# were never verified, they contradict what the hardware does, and having two
+# things called "HAT n" is how a stick ends up on codes that do nothing.
+# 0xBA..0xBD still round-trip, as literal 0xNN.
 for _n, _name in enumerate(["X1", "X2", "Y1", "Y2", "Z1", "Z2"]):
     GAME_CODES["TRACKBALL %s" % _name] = 0xC0 + _n
 
@@ -526,6 +663,7 @@ def decode_config(buf: bytes) -> dict:
         "deviceClass": "ipac2",
         "debounce": _debounce_name((cfg >> 3) & 0x03),
         "paclink": bool(cfg & 0x04),
+        "xinput": bool(cfg & XINPUT_BIT),
         "pins": pins,
     }
     if macros:
@@ -590,17 +728,17 @@ def _decode_macros(data: bytes) -> list:
     return macros
 
 
-def encode_config(profile: dict, base: bytes, reconfigure=False) -> bytearray:
+def encode_config(profile: dict, base: bytes, xinput=None) -> bytearray:
     """Apply a profile on top of the board's current config.
 
     Read-modify-write on purpose: bytes whose meaning we do not know - and
     on this board there are some, including whatever selects game controller
     mode - survive untouched.
 
-    RECONFIGURE_BIT is the exception. It is set only when asked for, never
-    inherited from the base: a config read back from a board that was last
-    reconfigured would otherwise carry the bit forward and make every
-    subsequent write a reconfiguration too.
+    XINPUT_BIT follows the same rule as debounce and paclink: the profile
+    decides if it names it, the `xinput` argument overrides, and otherwise the
+    board keeps what it had. Setting it sends the board to Xinput on the next
+    mode change, where there is no config interface at all.
     """
     buf = bytearray(base[:CONFIG_SIZE])
     if len(buf) != CONFIG_SIZE:
@@ -616,7 +754,9 @@ def encode_config(profile: dict, base: bytes, reconfigure=False) -> bytearray:
         cfg = (cfg & ~0x18) | (DEBOUNCE[value] << 3)
     if "paclink" in profile:
         cfg = (cfg | 0x04) if profile["paclink"] else (cfg & ~0x04)
-    cfg = (cfg | RECONFIGURE_BIT) if reconfigure else (cfg & ~RECONFIGURE_BIT)
+    want = profile.get("xinput") if xinput is None else xinput
+    if want is not None:
+        cfg = (cfg | XINPUT_BIT) if want else (cfg & ~XINPUT_BIT & 0xFF)
     buf[3] = cfg
 
     data = memoryview(buf)[4:]
@@ -690,20 +830,21 @@ def _encode_macros(macros: list, data: memoryview) -> dict:
     return codes
 
 
-def as_write_command(buf: bytes, reconfigure=False) -> bytes:
+def as_write_command(buf: bytes, xinput=None) -> bytes:
     """Put the write header on a config buffer.
 
     Reads come back headed [0x00, 0x00, firmware, cfg]; writes must be
     headed 0x50 0xdd 0x0f. Byte 3 (the config bitfield) is real config and is
-    left alone, apart from RECONFIGURE_BIT, which is stated rather than
-    carried over - see encode_config.
+    left alone - a byte-exact restore includes XINPUT_BIT, unless `xinput`
+    overrides it.
     """
     out = bytearray(buf[:CONFIG_SIZE])
     out[0], out[1], out[2] = HEADER_WRITE
-    if reconfigure:
-        out[3] |= RECONFIGURE_BIT
-    else:
-        out[3] &= ~RECONFIGURE_BIT
+    if xinput is not None:
+        if xinput:
+            out[3] |= XINPUT_BIT
+        else:
+            out[3] &= ~XINPUT_BIT & 0xFF
     return bytes(out)
 
 
@@ -1419,8 +1560,23 @@ def parse_input_events(blob: bytes) -> list:
     ]
 
 
-def event_action(etype: int, code: int):
-    """(kind, board byte) for an evdev event; the byte is None if unmapped."""
+def player_block_first(player=None) -> int:
+    """The first code of a player's block. Player 1 unless told otherwise."""
+    if not player or player < 1:
+        return GAMEPAD_FIRST_CODE
+    return GAMEPAD_FIRST_CODE + PLAYER_BLOCK * (player - 1)
+
+
+def event_action(etype: int, code: int, player=None):
+    """(kind, board byte) for an evdev event; the byte is None if unmapped.
+
+    `player` matters for anything in a controller block. Each player is a
+    separate device numbering its own buttons from zero, so button 1 on
+    player 2's node is player 2's block plus one - not player 1's. Without it
+    the monitor named every player 2 press with a player 1 code and pointed at
+    a player 1 pin, which is how a press on one panel came back as a pin on
+    the other.
+    """
     if etype == EV_KEY:
         if code < BTN_MOUSE:
             return "key", LINUX_TO_BOARD.get(code)
@@ -1429,18 +1585,33 @@ def event_action(etype: int, code: int):
             return "mouse", (MOUSE_CODES["MOUSE L"], MOUSE_CODES["MOUSE R"],
                              MOUSE_CODES["MOUSE M"])[code - BTN_MOUSE]
         if BTN_JOYSTICK <= code < BTN_LAST:
-            # 0x120..0x13f is exactly 32 codes, against GAMEPAD 1..32. This
-            # assumes hid-input numbered the board's buttons from BTN_TRIGGER,
-            # which is what it does for a device that presents as a joystick.
-            # Every event carries its raw code, so if a real board in Dinput
-            # mode disagrees the offset is visible rather than silent.
-            return "gamepad", GAME_CODES["GAMEPAD %d" % (code - BTN_JOYSTICK + 1)]  # noqa: E501
+            # BTN_JOYSTICK is button 0, and GAMEPAD 0 is the board's first
+            # button, so the offset is zero. It used to be +1, left over from
+            # when the code names were 1-based; after the names were renumbered
+            # the monitor kept adding one and named every button one too high,
+            # and then pointed at whichever pin carried THAT code. Pressing
+            # start reported the pin next to it.
+            #
+            # This assumes hid-input numbered the board's buttons from
+            # BTN_TRIGGER, which is what it does for a device presenting as a
+            # joystick. Every line carries its raw evdev code, so a board that
+            # disagrees shows the offset rather than hiding it.
+            index = code - BTN_JOYSTICK
+            board = player_block_first(player) + index
+            return "gamepad", board if is_game_code(board) else None
         return "button", None
     if etype == EV_ABS:
+        # No board byte. An axis event says which axis the HOST moved, and the
+        # board byte that caused it cannot be recovered from that - several
+        # different board codes drive the same axis, in opposite directions.
+        #
+        # This used to answer HAT n / ANALOG n by mapping the evdev axis number
+        # through the board's code table, which is a category error: it made
+        # the monitor print a board code the config did not contain, then say
+        # "no pin carries this code" about a pin that plainly did. It sent an
+        # afternoon chasing a table that was never involved.
         if ABS_HAT0X <= code < ABS_HAT0X + 4:
-            return "hat", GAME_CODES["HAT %d" % (code - ABS_HAT0X)]
-        if code < 8:
-            return "analog", GAME_CODES["ANALOG %d" % code]
+            return "hat", None
         return "axis", None
     if etype == EV_REL:
         if code < 2:
@@ -1647,8 +1818,14 @@ class BaseMonitor:
         self.stream = stream or EventStream()
         self.profile = profile
         self.error = None
-        self._rest = {}  # (node, axis) -> the value that counts as "not held"
-        self._held = {}  # (node, axis) -> whether it is away from rest
+        self._last = {}  # (node, axis) -> the last value it reported
+        # Player attribution is only meaningful when the board actually
+        # presents two pads. With one, every event carries player 1 and a code
+        # both players share gets narrowed to the player 1 pin - a guess
+        # dressed as a fact, and one that names the wrong pin every time the
+        # other player presses something.
+        self._can_tell_players_apart = len(
+            [d for d in self.devices if getattr(d, "player", None)]) > 1
         self._muted = set()  # (node, type) already reported as unreadable
         self._thread = None
         self._stop = threading.Event()
@@ -1692,7 +1869,8 @@ class BaseMonitor:
         if etype == EV_KEY and value == 2:
             return None  # autorepeat, which would flood a held button
 
-        kind, board_code = event_action(etype, code)
+        kind, board_code = event_action(
+            etype, code, getattr(device, "player", None))
 
         muted = False
         if kind == "other":
@@ -1710,20 +1888,26 @@ class BaseMonitor:
             muted = True
 
         if etype == EV_ABS:
-            # Axes have no press/release; the value they sit at when nothing is
-            # touched counts as released. Taking the first value seen as that
-            # resting point works for sticks centred at 0 and at 128 alike.
+            # An axis has no press and no release, so held stays None and the
+            # value is what gets reported.
+            #
+            # This used to guess a resting point - "the first value seen counts
+            # as not held". An evdev axis only emits when it CHANGES, so the
+            # first event is always a press, which made the press define rest,
+            # get swallowed as a non-event, and the release then read as a
+            # press. Every axis line was the wrong edge, and every first press
+            # was missing. Confirmed on hardware while mapping a stick.
             key = (device.node, code)
-            rest = self._rest.setdefault(key, value)
-            held = value != rest
-            if held == self._held.get(key, False):
-                return None  # jitter, or the axis settling back
-            self._held[key] = held
+            if self._last.get(key) == value:
+                return None  # nothing actually changed
+            self._last[key] = value
+            held = None
         else:
             held = value != 0
 
         name = code_to_name(board_code) if board_code is not None else None
         player = device.player if kind in ("gamepad", "hat", "analog") else None
+        narrow_by = player if self._can_tell_players_apart else None
         return {
             "ts": time.time(),
             "device": device.path,
@@ -1738,7 +1922,7 @@ class BaseMonitor:
             "name": name,
             "code": board_code,
             "muted": muted,
-            "pins": pins_for_action(self.profile, name, player),
+            "pins": pins_for_action(self.profile, name, narrow_by),
         }
 
     def _emit(self, device, etype, code, value):
@@ -2207,7 +2391,7 @@ def merge_profile(base: dict, incoming: dict) -> dict:
             order.append(name)
         by_name[name].update({k: v for k, v in pin.items() if k != "name"})
     merged["pins"] = [by_name[name] for name in order]
-    for key in ("debounce", "paclink"):
+    for key in ("debounce", "paclink", "xinput"):
         if key in incoming:
             merged[key] = incoming[key]
     # The incoming file's raw bytes describe the incoming file, not the
@@ -2342,7 +2526,7 @@ def cmd_apply(args) -> int:
     profile = load_profile(args.profile)
     with open_board(args) as board:
         current = board.read_config()
-        updated = bytes(encode_config(profile, current, args.reconfigure))
+        updated = bytes(encode_config(profile, current, args.xinput))
         changes = diff_config(current, updated)
 
         warning = _gamepad_warning(profile, board.info)
@@ -2352,6 +2536,14 @@ def cmd_apply(args) -> int:
         hotkeys = hotkey_warning(updated)
         if hotkeys:
             print("WARNING: %s\n" % hotkeys, file=sys.stderr)
+
+        xinput = xinput_warning(updated, board.info)
+        if xinput:
+            print("WARNING: %s\n" % xinput, file=sys.stderr)
+
+        unconfirmed = unconfirmed_code_warning(updated)
+        if unconfirmed:
+            print("note: %s\n" % unconfirmed, file=sys.stderr)
 
         blocked = flash_write_blocked(board.info)
         if blocked and args.dry_run:
@@ -2409,7 +2601,22 @@ def _fmt_byte(value: int) -> str:
     return "0x%02x" % value
 
 
-GAMEPAD_PREFIXES = ("GAMEPAD", "HAT", "ANALOG")
+GAMEPAD_PREFIXES = ("GAMEPAD", "DPAD", "HAT", "ANALOG")
+
+# Whether a byte is a game-controller action, tested by RANGE rather than by
+# the name it happens to have. Both players' blocks and their axes live in
+# 0x8e..0xbf; keycodes are below and macros above.
+#
+# This used to match on the first word of the name, which broke the moment
+# player 2's codes were called "P2 GAMEPAD n": "P2" is not in the prefix list,
+# so a perfectly good two-player gamepad profile read as mixed and would have
+# been reported as unable to switch the board's mode.
+GAME_CODE_FIRST = GAMEPAD_FIRST_CODE
+GAME_CODE_LAST = P2_FIRST_CODE + PLAYER_BLOCK - 1
+
+
+def is_game_code(code: int) -> bool:
+    return GAME_CODE_FIRST <= code <= GAME_CODE_LAST
 
 
 def config_kind(raw: bytes) -> str:
@@ -2433,12 +2640,15 @@ def config_kind(raw: bytes) -> str:
     for name in PIN_ORDER:
         ai, alt_i, _ = PIN_TABLE[name]
         for index in (ai, alt_i):
-            action = code_to_name(data[index])
-            if action is None or action == NONE:
-                continue  # unassigned, or a macro/unknown byte - no opinion
-            kinds.add(
-                "gamepad" if action.split()[0] in GAMEPAD_PREFIXES else "keyboard"
-            )
+            code = data[index]
+            if not code:
+                continue  # unassigned - no opinion
+            if is_game_code(code):
+                kinds.add("gamepad")
+            elif code_to_name(code) is None:
+                continue  # a macro or a byte we do not recognise - no opinion
+            else:
+                kinds.add("keyboard")
     if len(kinds) == 1:
         return kinds.pop()
     return "mixed"
@@ -2476,11 +2686,7 @@ def hotkey_warning(raw: bytes):
         )
 
     def inert(name):
-        # An unassigned pin decodes to NONE, which is falsy but not None.
-        action = code_to_name(data[PIN_TABLE[name][0]])
-        if not action:
-            return False
-        return action.split()[0] in GAMEPAD_PREFIXES
+        return is_game_code(data[PIN_TABLE[name][0]])
 
     dead = [n for n in shift_pins + list(MODE_SELECT_PINS) if inert(n)]
     if not dead:
@@ -2496,16 +2702,82 @@ def hotkey_warning(raw: bytes):
     )
 
 
+def control_span(first: int):
+    """(buttons, hat, axes) code ranges for one player's block."""
+    buttons = range(first, first + GAMEPAD_BUTTONS_CONFIRMED)
+    hat = range(buttons.stop, buttons.stop + DPAD_COUNT)
+    axes = range(hat.stop, first + PLAYER_BLOCK)
+    return buttons, hat, axes
+
+
+def unconfirmed_code_warning(raw: bytes):
+    """Pins on codes inside a player's block but not a button or a hat.
+
+    Each block is 25 codes: eleven buttons, four hat directions, and ten more
+    that are only known to be axis controls - 0x9d was seen moving ABS_X, and
+    nothing else in that stretch has been pressed. Assigned to a stick
+    direction one of them moves an axis instead of the d-pad, which looks like
+    a direction that simply does not work.
+    """
+    data = raw[4:]
+    axis_codes = set()
+    for first in (GAMEPAD_FIRST_CODE, P2_FIRST_CODE):
+        axis_codes.update(control_span(first)[2])
+
+    hits = []
+    for name in PIN_ORDER:
+        for index, field in ((PIN_TABLE[name][0], ""), (PIN_TABLE[name][1], " alt")):
+            code = data[index]
+            if code in axis_codes:
+                hits.append("%s%s=0x%02x" % (name, field, code))
+    if not hits:
+        return None
+    return (
+        "%s sit in the axis part of a player's block. Each player has eleven "
+        "buttons then four hat directions then ten codes that are only known "
+        "to move axes; on a stick direction one of those moves an axis rather "
+        "than the d-pad, which reads as a direction that does nothing."
+        % ", ".join(hits)
+    )
+
+
+def xinput_warning(raw: bytes, info: DeviceInfo):
+    """Whether this write hands the board to Xinput, or takes it out.
+
+    Worth saying out loud in both directions. Xinput has no config interface,
+    so a write that sets the bit is the last one this tool can make until the
+    board is brought back by hand.
+    """
+    setting = bool(raw[3] & XINPUT_BIT)
+    if setting:
+        return (
+            "this config has the Xinput bit set, so the board will come up in "
+            "Xinput - as 045e:028e, wearing an Xbox 360 pad's identity. There "
+            "is no hid interface in Xinput, so this tool cannot reach the "
+            "board again until you bring it back: hold Start1+P1SW4 for 10s "
+            "for Dinput, Start1+P1SW1 for keyboard, or hold P1SW1 while "
+            "plugging in usb.\n"
+            "Pass --no-xinput to clear the bit instead."
+        )
+    if info.mode != MODE_KEYBOARD and info.vendor == VENDOR_XINPUT:
+        return (
+            "this config clears the Xinput bit, so the board will leave "
+            "Xinput on its next mode change."
+        )
+    return None
+
+
 def mode_switch_note(raw: bytes, info: DeviceInfo):
     """What the board is expected to do with its mode after this download."""
     kind = config_kind(raw)
     if kind == "gamepad" and info.mode == MODE_KEYBOARD:
         return (
-            "this is a gamepad-only config, so the board is expected to "
-            "switch itself to Dinput mode 4 (or Xinput mode 5, if it carries "
-            "an Xbox HOME button) - Ultimarc's firmware picks the mode from "
-            "what it is sent. Check with `lsusb | grep -i d209`: 0421 means "
-            "it switched. If it stayed on 0420, hold Start1+P1SW4 for 10s."
+            "this is a gamepad-only config. Ultimarc document the board as "
+            "switching itself to a gamepad mode when it is sent one, but that "
+            "did not happen on a 1.55 board - with or without --reconfigure. "
+            "Expect to switch by hand: hold Start1 with P1SW2..P1SW5 for 10s "
+            "and check `lsusb` for which one gives d209:0421 (Dinput). The "
+            "config you just wrote is what those modes will use."
         )
     if kind == "keyboard" and info.mode != MODE_KEYBOARD:
         return (
@@ -2514,19 +2786,24 @@ def mode_switch_note(raw: bytes, info: DeviceInfo):
         )
     if kind == "mixed":
         return (
-            "this config mixes keyboard and gamepad actions, so the board "
-            "will stay in %s mode - the automatic switch only fires for a "
-            "download that is entirely one or the other. Pins the profile "
-            "leaves unassigned keep what the board already had, which is how "
-            "a gamepad profile ends up mixed; assign every pin, or switch "
-            "mode by hand with Start1+P1SW4 held for 10s." % info.mode
+            "this config mixes keyboard and gamepad actions. Pins the profile "
+            "leaves unassigned keep what the board already had, and alternate "
+            "actions count too, which is how a gamepad profile ends up mixed "
+            "without anyone meaning it to - profiles/gamepad.json assigns "
+            "every pin and clears every alternate. Note that on a 1.55 board "
+            "even a properly gamepad-only download did not switch the mode by "
+            "itself, so expect to use the hotkeys either way."
         )
     return None
 
 
 def _gamepad_warning(profile: dict, info: DeviceInfo):
+    def is_game_action(value):
+        code = ALL_CODES.get(str(value).strip()) or ALL_CODES.get(str(value).strip().upper())
+        return code is not None and is_game_code(code)
+
     uses_gamepad = any(
-        str(pin.get(field, "")).upper().startswith(GAMEPAD_PREFIXES)
+        is_game_action(pin.get(field))
         for pin in profile.get("pins", [])
         for field in ("action", "alternate_action")
     )
@@ -2542,8 +2819,7 @@ def _gamepad_warning(profile: dict, info: DeviceInfo):
 
 def cmd_restore(args) -> int:
     profile = load_profile(args.backup)
-    raw = as_write_command(raw_from_profile(profile, args.backup),
-                           args.reconfigure)
+    raw = as_write_command(raw_from_profile(profile, args.backup), args.xinput)
     with open_board(args) as board:
         for note in import_notes(profile, board.info):
             print("note: %s" % note, file=sys.stderr)
@@ -2628,9 +2904,22 @@ def read_profile_quietly(args):
 def monitor_line(event: dict) -> str:
     """One press as a line of terminal output."""
     when = datetime.datetime.fromtimestamp(event["ts"]).strftime("%H:%M:%S")
-    what = event["name"] or "%s %d" % (event["kind"], event["raw"])
+    # The name is what the board code WOULD be if the host's numbering and the
+    # board's line up. They do for buttons 1-8, confirmed on hardware; they do
+    # not for everything, and when they disagree the pin named below is the
+    # wrong one. Always print the raw evdev code so the inference is checkable
+    # rather than invisible.
+    if event["kind"] in ("hat", "axis"):
+        # Name the axis the host moved, not a board code - there is no board
+        # code to name, and inventing one is what made this confusing.
+        what = "%s %s" % (
+            event["kind"], AXIS_NAMES.get(event["raw"], "0x%x" % event["raw"]))
+    else:
+        what = event["name"] or "%s %d" % (event["kind"], event["raw"])
     if event["code"] is not None:
         what += " (0x%02x)" % event["code"]
+    if event.get("raw") is not None:
+        what += " [evdev %s/0x%x]" % (event.get("type", "?"), event["raw"])
     if event["pins"]:
         where = " ".join(
             pin["pin"] if pin["field"] == "action" else "%s (shifted)" % pin["pin"]
@@ -2638,15 +2927,29 @@ def monitor_line(event: dict) -> str:
         )
         if len(event["pins"]) > 1:
             where += "  <- several pins carry this code"
+    elif event["kind"] in ("hat", "axis"):
+        where = "-- an axis; which pin moved it is not recoverable from the event"
     elif event["name"]:
         where = "-- no pin carries this code"
     elif event.get("muted"):
         where = "-- not an action the board can store; hiding the rest of these"
     else:
         where = "-- not an action the board can store"
-    return "%s  %-4s %-22s %-30s %s" % (
-        when, "down" if event["held"] else "up", what, where, event["node"]
-    )
+    if event["held"] is None:
+        # An axis: there is no edge to name, so say where it went.
+        edge = "=%s" % event.get("value")
+    else:
+        edge = "down" if event["held"] else "up"
+    # The node is what says which controller a press came from, and that is
+    # the whole answer when a code is on both players' pins. Spell it out.
+    node = event["node"]
+    if event.get("player"):
+        node += " (player %d)" % event["player"]
+    return "%s  %-6s %-30s %-30s %s" % (when, edge, what, where, node)
+
+
+AXIS_NAMES = {0x00: "X", 0x01: "Y", 0x02: "Z",
+              0x10: "HAT0X", 0x11: "HAT0Y", 0x12: "HAT1X", 0x13: "HAT1Y"}
 
 
 def cmd_monitor(args) -> int:
@@ -2658,11 +2961,20 @@ def cmd_monitor(args) -> int:
         print("error: %s" % exc, file=sys.stderr)
         return 1
 
+    pads = [d for d in monitor.devices if d.player]
     for device in monitor.devices:
         print("watching %s  %s%s" % (
             device.path, device.name,
             " (player %d)" % device.player if device.player else "",
         ))
+    if len(pads) < 2:
+        print(
+            "note: %d game controller node%s. Both players' controls share one "
+            "code space,\n      so with fewer than two pads a code cannot be "
+            "attributed to a player -\n      lines will name every pin that "
+            "carries the code, not one of them."
+            % (len(pads), "" if len(pads) == 1 else "s")
+        )
     if getattr(args, "grab", False):
         print("exclusive capture is on - presses will NOT reach Batocera")
     print("press a control on the panel; ctrl-c to stop")
@@ -2762,13 +3074,23 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="write even in a mode where the board will not commit to flash",
     )
-    p.add_argument(
-        "--reconfigure",
+    xinput = p.add_mutually_exclusive_group()
+    xinput.add_argument(
+        "--xinput", "--reconfigure",
+        dest="xinput",
         action="store_true",
-        help="set the reconfigure bit, which is what WinIPAC's File -> Force "
-             "Board Reconfiguration sends. Makes the board act on the "
-             "download rather than only store it, including switching mode "
-             "if the config calls for one",
+        default=None,
+        help="mark the config as an Xinput one (config bit 1), so the board "
+             "comes up as an Xbox 360 pad. This is the bit WinIPAC's File -> "
+             "Force Board Reconfiguration sets. NOTE Xinput has no config "
+             "interface, so this tool cannot reach the board afterwards",
+    )
+    xinput.add_argument(
+        "--no-xinput",
+        dest="xinput",
+        action="store_false",
+        help="clear the Xinput bit, so the board's gamepad mode is Dinput. "
+             "Without either flag the board keeps whatever it had",
     )
     p.set_defaults(func=cmd_apply)
 
@@ -2782,13 +3104,23 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="write even in a mode where the board will not commit to flash",
     )
-    p.add_argument(
-        "--reconfigure",
+    xinput = p.add_mutually_exclusive_group()
+    xinput.add_argument(
+        "--xinput", "--reconfigure",
+        dest="xinput",
         action="store_true",
-        help="set the reconfigure bit, which is what WinIPAC's File -> Force "
-             "Board Reconfiguration sends. Makes the board act on the "
-             "download rather than only store it, including switching mode "
-             "if the config calls for one",
+        default=None,
+        help="mark the config as an Xinput one (config bit 1), so the board "
+             "comes up as an Xbox 360 pad. This is the bit WinIPAC's File -> "
+             "Force Board Reconfiguration sets. NOTE Xinput has no config "
+             "interface, so this tool cannot reach the board afterwards",
+    )
+    xinput.add_argument(
+        "--no-xinput",
+        dest="xinput",
+        action="store_false",
+        help="clear the Xinput bit, so the board's gamepad mode is Dinput. "
+             "Without either flag the board keeps whatever it had",
     )
     p.set_defaults(func=cmd_restore)
 
@@ -3213,13 +3545,14 @@ def _make_handler(args):
             with open_board(args) as board:
                 current = board.read_config()
                 updated = bytes(encode_config(
-                    profile, current, bool(payload.get("reconfigure"))))
+                    profile, current, payload.get("xinput")))
                 result = self._changes_result(board, current, updated, profile)
                 blocked = flash_write_blocked(board.info)
                 if blocked:
                     result["flash_warning"] = blocked
                 result["mode_note"] = mode_switch_note(updated, board.info)
                 result["hotkey_warning"] = hotkey_warning(updated)
+                result["xinput_warning"] = xinput_warning(updated, board.info)
                 if not dry_run and result["changes"]:
                     if blocked and not payload.get("force"):
                         raise ProtocolError(blocked)
@@ -3261,7 +3594,7 @@ def _make_handler(args):
             dry_run = bool(payload.get("dry_run"))
             profile, origin = self._incoming(payload)
             updated = as_write_command(raw_from_profile(profile, origin),
-                                       bool(payload.get("reconfigure")))
+                                       payload.get("xinput"))
 
             with open_board(args) as board:
                 current = board.read_config()
@@ -3273,6 +3606,7 @@ def _make_handler(args):
                     result["flash_warning"] = blocked
                 result["mode_note"] = mode_switch_note(updated, board.info)
                 result["hotkey_warning"] = hotkey_warning(updated)
+                result["xinput_warning"] = xinput_warning(updated, board.info)
                 if not dry_run and result["changes"]:
                     if blocked and not payload.get("force"):
                         raise ProtocolError(blocked)
@@ -3391,11 +3725,13 @@ PAGE = """<!doctype html>
       <button id="clear">Reset all pins</button>
     </div>
     <label class="row" style="margin-top:.6rem;gap:.4rem;align-items:flex-start">
-      <input type="checkbox" id="reconfigure">
-      <span class="muted">Reconfigure the board after writing &mdash; sets the
-      bit WinIPAC's <em>File &rarr; Force Board Reconfiguration</em> sends, so the
-      board acts on the download rather than only storing it. Needed for a
-      change of mode to take effect; harmless otherwise.</span>
+      <input type="checkbox" id="xinput">
+      <span class="muted">Mark this config as <strong>Xinput</strong> &mdash; the
+      board comes up as an Xbox 360 pad instead of a Dinput controller. This is
+      the bit WinIPAC's <em>File &rarr; Force Board Reconfiguration</em> sets.
+      <strong>There is no config interface in Xinput</strong>, so this page cannot
+      reach the board afterwards; hold Start1+P1SW4 for 10s to get back to Dinput.
+      Leave it as it is to keep whatever the board already has.</span>
     </label>
     <div id="status"></div>
   </div>
@@ -3416,10 +3752,10 @@ PAGE = """<!doctype html>
       <tr><td class="pin">Start1 + P1SW3</td><td>3 &mdash; Xinput preset</td>
           <td class="muted"><strong>ignores your config</strong>; this tool also
           cannot reach the board in Xinput</td></tr>
-      <tr><td class="pin">Start1 + P1SW4</td><td>4 &mdash; contested</td>
-          <td class="muted">documented as Dinput using your config, but observed
-          putting a 1.55 board into <strong>Xinput</strong>, where this tool cannot
-          reach it. Check with the board panel above after switching</td></tr>
+      <tr><td class="pin">Start1 + P1SW4</td><td>4 &mdash; Dinput user set</td>
+          <td class="muted">two game controllers, <strong>using your config</strong>
+          &mdash; this is the gamepad mode you want. Confirmed on hardware
+          (d209:0421)</td></tr>
       <tr><td class="pin">Start1 + P1SW5</td><td>5 &mdash; Xinput user set</td>
           <td class="muted">uses your config, but this tool cannot reach the board
           in Xinput</td></tr>
@@ -3604,6 +3940,11 @@ function renderChanges(result, target) {
     $(target).insertAdjacentHTML('afterbegin',
       `<div class="banner warn">${esc(result.hotkey_warning)}</div>`);
   }
+  // Xinput has no config interface: this would be the last write we can make.
+  if (result.xinput_warning) {
+    $(target).insertAdjacentHTML('afterbegin',
+      `<div class="banner warn">${esc(result.xinput_warning)}</div>`);
+  }
 }
 
 async function loadDevice() {
@@ -3635,7 +3976,7 @@ async function send(dry) {
     renderChanges(await post('/api/config', {
       profile: collect(),
       dry_run: dry,
-      reconfigure: $('#reconfigure').checked,
+      xinput: $('#xinput').checked,
     }));
     if (!dry) { loadConfig(); loadSaved(); }
   } catch (err) {
@@ -3928,7 +4269,7 @@ async function restoreExactly(source, name, dry) {
   saySaved('working...');
   try {
     renderChanges(await post('/api/restore',
-      Object.assign({ dry_run: dry, reconfigure: $('#reconfigure').checked },
+      Object.assign({ dry_run: dry, xinput: $('#xinput').checked },
                     source)), '#savedStatus');
     if (!dry) { loadConfig(); loadSaved(); }
   } catch (err) {

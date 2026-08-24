@@ -1,0 +1,208 @@
+{
+  "_comment": "Two-player gamepad map for an I-PAC 2. Each player has its own block of codes, which is what makes them two controllers rather than one: the board reads the CODE to decide which controller a press belongs to, not which pin group it came from.",
+  "_players": "Player 1 uses 0x8e..0x9c, player 2 the same layout 25 codes higher at 0xa7..0xb5. Giving both players identical codes collapses them onto controller 1 and player 2's buttons mirror player 1's - confirmed the hard way.",
+  "_measured_and_predicted": "Both players' buttons and hats are measured on hardware now. Player 2's hat was predicted from the block arithmetic and then confirmed firing the same axis pairing and the same order as player 1's. The only part still inferred is the ten axis codes at the top of each block, which nothing has needed.",
+  "_usage": "1. keyboard mode:  ipacconf.py apply profiles/gamepad.json\n2. Start1+P1SW4 for 10s -> Dinput\n3. Batocera: CONTROLLER & BLUETOOTH SETTINGS -> CONFIGURE A CONTROLLER, once per player.",
+  "_not_wired": "sw7, sw8 and player 2's start are not wired on this cabinet. They are still assigned: an unassigned pin keeps whatever keycode the board had, which makes the download mixed and stops it being a gamepad config.",
+  "schemaVersion": 2.0,
+  "resourceType": "ipac2-pins",
+  "deviceClass": "ipac2",
+  "debounce": "standard",
+  "paclink": false,
+  "xinput": false,
+  "pins": [
+    {
+      "name": "1up",
+      "description": "P1 stick up",
+      "action": "HAT 0 UP",
+      "alternate_action": ""
+    },
+    {
+      "name": "1down",
+      "description": "P1 stick down",
+      "action": "HAT 0 DOWN",
+      "alternate_action": ""
+    },
+    {
+      "name": "1left",
+      "description": "P1 stick left",
+      "action": "HAT 0 LEFT",
+      "alternate_action": ""
+    },
+    {
+      "name": "1right",
+      "description": "P1 stick right",
+      "action": "HAT 0 RIGHT",
+      "alternate_action": ""
+    },
+    {
+      "name": "1sw1",
+      "description": "P1 sw1",
+      "action": "GAMEPAD 0",
+      "alternate_action": ""
+    },
+    {
+      "name": "1sw2",
+      "description": "P1 sw2",
+      "action": "GAMEPAD 1",
+      "alternate_action": ""
+    },
+    {
+      "name": "1sw3",
+      "description": "P1 sw3",
+      "action": "GAMEPAD 2",
+      "alternate_action": ""
+    },
+    {
+      "name": "1sw4",
+      "description": "P1 sw4",
+      "action": "GAMEPAD 3",
+      "alternate_action": ""
+    },
+    {
+      "name": "1sw5",
+      "description": "P1 sw5",
+      "action": "GAMEPAD 4",
+      "alternate_action": ""
+    },
+    {
+      "name": "1sw6",
+      "description": "P1 sw6",
+      "action": "GAMEPAD 5",
+      "alternate_action": ""
+    },
+    {
+      "name": "1sw7",
+      "description": "P1 not wired",
+      "action": "GAMEPAD 8",
+      "alternate_action": ""
+    },
+    {
+      "name": "1sw8",
+      "description": "P1 not wired",
+      "action": "GAMEPAD 9",
+      "alternate_action": ""
+    },
+    {
+      "name": "2up",
+      "description": "P2 stick up",
+      "action": "P2 HAT UP",
+      "alternate_action": ""
+    },
+    {
+      "name": "2down",
+      "description": "P2 stick down",
+      "action": "P2 HAT DOWN",
+      "alternate_action": ""
+    },
+    {
+      "name": "2left",
+      "description": "P2 stick left",
+      "action": "P2 HAT LEFT",
+      "alternate_action": ""
+    },
+    {
+      "name": "2right",
+      "description": "P2 stick right",
+      "action": "P2 HAT RIGHT",
+      "alternate_action": ""
+    },
+    {
+      "name": "2sw1",
+      "description": "P2 sw1",
+      "action": "P2 GAMEPAD 0",
+      "alternate_action": ""
+    },
+    {
+      "name": "2sw2",
+      "description": "P2 sw2",
+      "action": "P2 GAMEPAD 1",
+      "alternate_action": ""
+    },
+    {
+      "name": "2sw3",
+      "description": "P2 sw3",
+      "action": "P2 GAMEPAD 2",
+      "alternate_action": ""
+    },
+    {
+      "name": "2sw4",
+      "description": "P2 sw4",
+      "action": "P2 GAMEPAD 3",
+      "alternate_action": ""
+    },
+    {
+      "name": "2sw5",
+      "description": "P2 sw5",
+      "action": "P2 GAMEPAD 4",
+      "alternate_action": ""
+    },
+    {
+      "name": "2sw6",
+      "description": "P2 sw6",
+      "action": "P2 GAMEPAD 5",
+      "alternate_action": ""
+    },
+    {
+      "name": "2sw7",
+      "description": "P2 not wired",
+      "action": "P2 GAMEPAD 8",
+      "alternate_action": ""
+    },
+    {
+      "name": "2sw8",
+      "description": "P2 not wired",
+      "action": "P2 GAMEPAD 9",
+      "alternate_action": ""
+    },
+    {
+      "name": "1start",
+      "description": "P1 start",
+      "action": "GAMEPAD 7",
+      "alternate_action": "",
+      "shift": true
+    },
+    {
+      "name": "1coin",
+      "description": "P1 select / coin",
+      "action": "GAMEPAD 6",
+      "alternate_action": ""
+    },
+    {
+      "name": "1a",
+      "description": "P1 admin 1",
+      "action": "GAMEPAD 10",
+      "alternate_action": ""
+    },
+    {
+      "name": "1b",
+      "description": "P1 admin 2 (shares with a)",
+      "action": "GAMEPAD 10",
+      "alternate_action": ""
+    },
+    {
+      "name": "2start",
+      "description": "P2 start",
+      "action": "P2 GAMEPAD 7",
+      "alternate_action": ""
+    },
+    {
+      "name": "2coin",
+      "description": "P2 select / coin",
+      "action": "P2 GAMEPAD 6",
+      "alternate_action": ""
+    },
+    {
+      "name": "2a",
+      "description": "P2 admin 1",
+      "action": "P2 GAMEPAD 10",
+      "alternate_action": ""
+    },
+    {
+      "name": "2b",
+      "description": "P2 admin 2 (shares with a)",
+      "action": "P2 GAMEPAD 10",
+      "alternate_action": ""
+    }
+  ]
+}

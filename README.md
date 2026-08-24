@@ -112,12 +112,14 @@ python3 ipacconf.py serve --fake-device fixtures/ipac2-1.55-keyboard.json \
                           --fake-input fixtures/input-keyboard-mode.jsonl
 ```
 
-**One caveat, still to be settled against hardware.** In Dinput mode both
-players' buttons live in the same `GAMEPAD 1..32` code space, so the code alone
-cannot say who pressed. The event node it arrived on decides, on the assumption
-that the two gamepad interfaces come up in player order — which is unverified.
-Every line carries its raw evdev code, so if the board disagrees it is visible
-rather than silent.
+Each player has its own block of codes, so a code identifies the player as
+well as the control. The monitor decodes a press against the block of the pad
+node it arrived on, and prints the node and player on every line. Before that
+was true it named every player 2 press with a player 1 code and pointed at a
+player 1 pin, so a press on one panel came back as a pin on the other.
+
+Every line also carries its raw evdev code, so if the board ever disagrees
+with the table it is visible rather than silent.
 
 Until it is settled, the way to read a muddled panel is to stop guessing and
 isolate: the UI's *Reset all pins* button sets every action to none and writes
@@ -172,12 +174,13 @@ two tools:
 Pin names: `1up`/`1down`/`1left`/`1right` and `2up`… for the sticks, `1sw1`–
 `1sw8` and `2sw1`–`2sw8` for buttons, `1start`/`1coin`/`1a`/`1b` and the `2`
 equivalents. Actions are names from the code table — keys (`A`, `SPACE`,
-`CTRL L`, `F1`), `GAMEPAD 1`–`32`, `HAT 0`–`3`, `ANALOG 0`–`7`, `MOUSE L`,
-media keys — or `""` to unassign. `shift: true` makes that pin the shift key;
+`CTRL L`, `F1`), `GAMEPAD 0`–`10` and `HAT 0 UP`/`DOWN`/`LEFT`/`RIGHT` for
+player 1, `P2 GAMEPAD 0`–`10` and `P2 HAT UP`/… for player 2, `MOUSE L`, media
+keys — or `""` to unassign. `shift: true` makes that pin the shift key;
 `alternate_action` is what a pin sends while shift is held.
 
 `description` is an optional label. The board never sees it — the web UI shows
-it under the pin name, which is how `GAMEPAD 1` reads as *GP1 South (A /
+it under the pin name, which is how `GAMEPAD 0` reads as *GP1 South (A /
 Cross)* in the Batocera preset without the code table having to carry
 Batocera's vocabulary. Descriptions survive loading a profile into the form and
 downloading it again.
@@ -220,27 +223,24 @@ This is the usual reason to reach for the tool, and it depends on firmware:
 Ultimarc's preset gamepad modes run a fixed internal map and ignore the config
 block entirely, which is not obvious from the hotkey layout:
 
-| Hold with Start1, 10s | Mode (documented) | Uses your config? | Observed on 1.55 |
+| Hold with Start1, 10s | Mode | Uses your config? | Observed on 1.55 |
 |---|---|---|---|
 | `P1SW1` | 1 — keyboard | **yes** | `d209:0420` ✅ |
 | `P1SW2` | 2 — Dinput preset | no — fixed internal map | not recorded |
 | `P1SW3` | 3 — Xinput preset | no — fixed internal map | not recorded |
-| `P1SW4` | 4 — Dinput user set | **yes** | `045e:028e` ⚠️ **Xinput** |
+| `P1SW4` | 4 — Dinput user set | **yes** | `d209:0421` ✅ |
 | `P1SW5` | 5 — Xinput user set | **yes** | not recorded |
 
 Documented source: the Multi-Mode tab on [Ultimarc's I-PAC 2
 page](https://www.ultimarc.com/control-interfaces/i-pacs/i-pac2/).
 
-**`P1SW4` does not do what the documentation says.** On a 1.55 board the led
-flashes four times — so the board agrees it selected mode 4 — and it then
-enumerates as `045e:028e`, the Xbox 360 pad identity, which is Xinput. There
-is no hid interface in Xinput, so that hotkey lands the board somewhere this
-tool cannot reach it. Ultimarc's own custom-Xinput recipe says to use
-`Start1+P1SW4` to get *back* to Dinput, which cannot also be true.
+**`P1SW4` is the gamepad mode to use**, and it does what Ultimarc document —
+led flashes four times, board comes up `d209:0421`.
 
-Unresolved. Until the whole table is recorded on hardware, treat mode 4 as
-contested and check with `list` after every switch. Coming back always works:
-`Start1+P1SW1`, or hold `P1SW1` while plugging in USB.
+**The mode a hotkey reaches depends on the config the board is holding.** An
+earlier run of `P1SW4` on the same board produced `045e:028e` — Xinput — and
+this document recorded that as the documentation being wrong. It was not. What
+differed was the config. See "the reconfigure bit" below for the likely reason.
 
 If a switch appears to do nothing at all, check the shift pin — see "A gamepad
 profile can disarm the mode hotkeys" below.
@@ -277,8 +277,12 @@ to a factory board leaves fifteen keycodes in place — the eight stick pins and
 seven alternate actions — so the download is mixed and the board stays in
 keyboard mode. `TestGamepadTemplateIsMixed` pins that down.
 
-`apply` now says which way it expects the mode to go, and says so explicitly
-when the answer is "nowhere, because this download is mixed".
+The switch does fire — but with the Xinput bit set it goes to Xinput, not
+Dinput. See "Force Board Reconfiguration" below. In practice: write in
+keyboard mode, then reach for `Start1+P1SW4`.
+
+`apply` says which way it expects the mode to go, and says so explicitly when
+the answer is "nowhere, because this download is mixed".
 
 ### A gamepad profile can disarm the mode hotkeys
 
@@ -312,26 +316,51 @@ the joystick does nothing, which is a recurring complaint on the Batocera
 forums. The board's stock map puts the stick on four separate buttons, and
 EmulationStation will not accept those as a d-pad.
 
-Writing a profile fixes it. Put the four directions on `HAT 1` and the buttons
-on `GAMEPAD 1`..`n`, then:
+Writing a profile fixes it — put the four directions on the **hat** codes and
+the buttons on the button codes:
 
 ```sh
 # 1. keyboard mode - the only mode that commits to flash
 #    hold Start1+P1SW1 for ten seconds
-ipacconf.py apply profiles/your-gamepad.json
+ipacconf.py apply profiles/gamepad.json
 # 2. hold Start1+P1SW4 for ten seconds -> Dinput, mode 4 (user set)
 #    NOT P1SW2, which is mode 2 and ignores what you just wrote
 ```
 
-If every pin including the sticks and the alternate actions is a gamepad
-action, step 2 should happen by itself.
+Batocera then detects both pads and the sticks map as up/down/left/right in
+the ES controller wizard. Confirmed on hardware, both players.
 
-Batocera then detects the I-PAC pads and the joystick maps as up/down/left/
-right in the ES controller wizard. Confirmed on hardware.
+**`profiles/gamepad.json` is the one to use.** It assigns all 32 pins, clears
+every alternate action, and gives each player its own block:
 
-`profiles/batocera-gamepad.template.json` is the starting point. Use `monitor`
-to find which physical control is on which pin before editing it — the pin
-names are the board's, not the panel's.
+| | player 1 | player 2 |
+|---|---|---|
+| stick | `HAT 0 UP`/`DOWN`/`LEFT`/`RIGHT` | `P2 HAT UP`/… |
+| buttons | `GAMEPAD 0`–`10` | `P2 GAMEPAD 0`–`10` |
+
+`profiles/batocera-gamepad.template.json` is the older partial one; it predates
+everything below and is kept only because it leaves unassigned pins alone,
+which is the safer thing if you want to change a few buttons and nothing else.
+
+Use `monitor` to find which physical control is on which pin before editing
+either — the pin names are the board's, not the panel's.
+
+Three things `gamepad.json` does on purpose:
+
+- **No HOME key.** A gamepad-only config carrying an Xbox HOME key sends the
+  board to Xinput mode 5 rather than Dinput mode 4, and Ultimarc recommend
+  Dinput unless an application needs Xinput. Add one if you want Xinput.
+- **`Start1` stays the I-PAC shift control**, even though it also sends a
+  gamepad button. It costs nothing and mode switching needs a shift control.
+- **Each player gets its own block of codes.** Giving both players the same
+  codes is not harmless: the board reads the code to decide which controller a
+  press belongs to, so identical codes put every press — player 2's included —
+  on controller 1, and player 2's buttons mirror player 1's.
+
+It does disarm the mode hotkeys while the board is in keyboard mode — `Start1`
+and `P1SW1`–`P1SW5` all carry gamepad actions, which are inert there. That is
+unavoidable in a gamepad-only map; `apply` warns, and holding `P1SW1` while
+plugging in USB always gets you back.
 
 Note you cannot check your work with `dump` while in Dinput; it does not report
 the live config. Dump in keyboard mode, or judge by behaviour.
@@ -376,7 +405,7 @@ descriptor says which.
 
 **That is what the "stale Dinput read" was.** An earlier version of this
 document recorded that dumping in Dinput returns what looks like a stock
-internal map — directions as GAMEPAD 10-13, the P2 side on ANALOG 1-5 —
+internal map — directions and the P2 side on codes nothing had written —
 regardless of what is in flash, and called the read untrustworthy. The simpler
 explanation is that those dumps were taken in **mode 2**, where that map is
 what the board is genuinely running, because mode 2 ignores the config block
@@ -420,32 +449,61 @@ re-evaluate it and re-enumerate.
 **Captured, on a 1.55 board.** It is not a separate message. Every burst
 WinIPAC sent was a write (`0x50`) or a read (`0x59`) — the same two headers
 this tool already speaks. What it does instead is **set bit 1 of the config
-bitfield**.
+bitfield**, and that bit means *"this config is an Xinput one"*.
 
 The capture holds two full 260-byte downloads: an ordinary write after a pin
 change, then *Force Board Reconfiguration*. They differ in exactly one byte:
 
-| | byte 3 | |
-|---|---|---|
-| ordinary write | `0x00` | store it |
-| Force Board Reconfiguration | `0x02` | store it **and act on it** |
+| | byte 3 |
+|---|---|
+| ordinary write | `0x00` |
+| Force Board Reconfiguration | `0x02` |
 
-All 256 config bytes were identical. Nothing else in the session came close.
+All 256 config bytes were identical.
 
 Bit 1 is what Ultimarc-linux calls `accelerometer_uio` and QtPyUltimarc calls
 `accelerometer` — a field belonging to the Ultimate I/O, the only board in the
-family that has one. An I-PAC 2 does not, which is why neither open-source
-implementation ever sets it, and why the command looked like it was missing:
-it was hiding in a field everyone had taken at face value.
+family that has one. An I-PAC 2 does not.
 
-`ipacconf.py` calls it `RECONFIGURE_BIT` and exposes it as `--reconfigure` on
-`apply` and `restore`, and a checkbox in the web UI. Off by default, matching
-WinIPAC, and never inherited from a config read back off the board — otherwise
-one reconfiguration would make every later write another one.
+#### How it was pinned down, and two wrong turns
 
-**Held as a strong inference, not a fact.** One capture, one board, one
-firmware. The confirming test is a write that changes mode: with the bit set it
-should re-enumerate, without it it should not.
+1. **"It applies the download."** The obvious reading of the capture, and
+   wrong. Setting it did not make the board act on a gamepad-only download,
+   and it **persisted in flash** rather than being consumed — so it is a
+   stored setting, not a command. The captured session never re-enumerated
+   either: we had recorded the menu item, not its effect.
+2. **"Ultimarc's automatic mode switch is broken."** Also wrong. A
+   gamepad-only config written with the bit *clear* stayed in keyboard mode,
+   and that looked like the documented auto-switch failing.
+3. **What actually happens.** Writing a gamepad-only config with the bit
+   **set**, from keyboard mode, takes the board to **Xinput** — confirmed with
+   Batocera watching, which reported a *Microsoft Xbox controller* connecting.
+   That is `045e:028e`, the identity the board wears in Xinput. Holding
+   `Start1+P1SW4` then moved it to Dinput (`d209:0421`).
+
+Which is exactly what Ultimarc document, once the menu item is read for what
+it is *used for* rather than what it is *called*. Their only recipe involving
+it builds a custom **Xinput** map:
+
+> Save the file as an Xinput configuration. Click "File, Force Board
+> Reconfiguration". The board should switch to Xinput mode using the custom
+> configuration.
+
+#### How this tool exposes it
+
+`XINPUT_BIT`, as `--xinput` / `--no-xinput` on `apply` and `restore` (with
+`--reconfigure` kept as an alias for the old name), a checkbox in the web UI,
+and an `"xinput"` field in dumped profiles.
+
+**It is preserved, not cleared.** It is ordinary config, so a write keeps
+whatever the board had unless the profile or a flag says otherwise — the same
+rule as `debounce` and `paclink`. An earlier version cleared it on every write,
+which would have silently taken an Xinput board back to Dinput.
+
+⚠️ **A write that sets it is the last write this tool can make.** Xinput
+exposes no hid interface. `apply` warns before writing one, and names the ways
+back: `Start1+P1SW4` for Dinput, `Start1+P1SW1` for keyboard, or hold `P1SW1`
+while plugging in USB.
 
 ### The trailing four bytes are a read header
 
@@ -711,25 +769,45 @@ indices that break the otherwise perfectly regular `action+50` layout, and one
 of them collides with `1sw5`'s. They look like typos, so all indices are
 derived from the rule. `--dry-run` will show it if a real board ever disagrees.
 
-**Gamepad buttons start at `0x8e`, not `0x90`.** QtPyUltimarc's
-`IPACSeriesMapping` starts them at `0x90` and this table copied it. Confirmed
-wrong against hardware: with a board read by WinIPAC, `0x8e` is *P1 Button 1
-(A)* and `0x92` is *P1 Button 5 (LR)* — two points four apart on both scales,
-so the origin is `0x8e`. "LR" is Left Rear, which is what Ultimarc's own
-multi-mode table calls button 5 in Xinput; a third agreement.
+**The game-controller code map is nothing like QtPyUltimarc's.** That table
+puts 32 contiguous buttons at `0x90`, analog at `0xB0` and hats at `0xBA`.
+Measured on a 1.55 board, pin by pin, it is two blocks of 25 — one per
+controller:
 
-The label is a promise, and the old one was false: a profile asking for
-`GAMEPAD 1` sent `0x90`, which the board and the host both call button 3.
+| | player 1 | player 2 |
+|---|---|---|
+| 11 buttons | `0x8e`–`0x98` | `0xa7`–`0xb1` |
+| 4 hat directions | `0x99`–`0x9c` | `0xb2`–`0xb5` |
+| 10 axes | `0x9d`–`0xa6` | `0xb6`–`0xbf` |
 
-⚠️ **This changes what an existing profile means.** A hand-written profile
-naming `GAMEPAD 5` now sends `0x92` where it used to send `0x94` — which is
-the fix, but it is a silent change if you wrote the profile by trial and error
-against the old numbering. Dumps and backups are unaffected: they carry `raw`
-bytes and `restore` is byte-exact. Only the *names* moved.
+Four things in there contradict upstream, and each cost real time:
 
-Only the bottom of the range is confirmed. Buttons run up to where `ANALOG 0`
-starts at `0xB0`, making 34 of them; whether the board really has 33 and 34 is
-unchecked, so those two are named for consistency rather than from evidence.
+- **Buttons start at `0x8e`, not `0x90`.** With a board read by WinIPAC, `0x8e`
+  is *P1 Button 1 (A)* and `0x92` is *P1 Button 5 (LR)* — four apart on both
+  scales. Every `GAMEPAD n` this tool wrote was two buttons out.
+- **There are eleven per player, not 32.** A twelfth is the first hat
+  direction, which is why a stick built on `GAMEPAD 12`–`15` half worked.
+- **The hat is at `0x99`, not `0xBA`.** `HAT 0 UP`/`DOWN`/`LEFT`/`RIGHT` are
+  `0x99`–`0x9c` in that order, measured by reading the evdev axis and value
+  each raised. Upstream's `HAT 0`–`3` are not registered at all: two things
+  with that name is how a stick ends up on codes that do nothing.
+- **The code picks the controller, not the pin group.** `0x9d` is not a
+  button, a hat direction, or past the end of anything — it is player 1's
+  first *axis* code, which is why assigning it to a direction moved `ABS_X`.
+
+Buttons are numbered from **zero**, matching Batocera, SDL and evdev rather
+than WinIPAC's 1-based display, since a cabinet is configured against the
+former.
+
+⚠️ **Both changes alter what an existing profile means.** `GAMEPAD 1` was
+`0x90`, then `0x8e`, and is now `0x8f`; nothing in a file records which
+convention it was written under, so hand-written profiles need checking by
+eye. Dumps and backups are unaffected — they carry `raw` bytes and `restore`
+is byte-exact. Only the names moved.
+
+The ten axis codes at the top of each block are the one part still inferred:
+25 minus 11 minus 4, with `0x9d` moving `ABS_X` as the only direct evidence.
+Nothing has needed them.
 
 ## Tests
 
@@ -737,7 +815,7 @@ unchecked, so those two are named for consistency rather than from evidence.
 python3 -m unittest test_ipacconf.py
 ```
 
-237 tests, no hardware required. Five groups matter most:
+318 tests, no hardware required. Six groups matter most:
 `decode(encode(x)) == x` byte-for-byte, which is what makes read-modify-write
 trustworthy; `TestRealBoardDump`, which checks the pin table against a capture
 from an actual board — every pin decoding to its factory MAME default is
@@ -748,61 +826,38 @@ what the input monitor stands on — it asserts no two keys reverse to the same
 action, since a collision there would name a pin that is not the one being
 pressed; and `TestAnalyseCapture`, which runs the capture analyser against a
 synthetic tshark dump, so the "every message has a header" mistake cannot come
-back and bury the one message a capture exists to find.
+back and bury the one message a capture exists to find; and
+`TestShippedGamepadProfile`, which holds the working cabinet's map in place —
+each direction on the code that means it, opposite directions adjacent so they
+share an axis, and no code shared between the two players.
 
 ## Next
 
-**Confirm the reconfigure bit changes a mode.** The capture says byte 3 bit 1
-is what *Force Board Reconfiguration* sets, but the recorded session never
-changed mode, so the bit was never seen to *do* anything. The test: from
-keyboard mode, apply a gamepad profile twice —
+Nothing here blocks a working cabinet. Both players run as Dinput game
+controllers with hat sticks and eleven buttons each, mapped in Batocera.
 
-```sh
-ipacconf.py apply gamepad.json                 # expect: no re-enumeration
-ipacconf.py apply gamepad.json --reconfigure   # expect: board re-enumerates
-lsusb | grep -iE "d209|045e:028e"
-```
+**Software mode switching.** Still unsolved, and now the only interesting gap.
+Setting the Xinput bit moves the board to Xinput on the next download; nothing
+found so far moves it to *Dinput* from software, so `Start1+P1SW4` is the way
+in. Ultimarc say the supported method is loading a config file from WinIPAC,
+so the capture worth taking is WinIPAC writing its default **Dinput** IPC file
+with `usbmon` running. `analyse_capture.py` will point at the burst before the
+address changed.
 
-If the second one moves the board and the first does not, the inference is
-confirmed and the whole mode-switching problem is solved from software.
+**The rest of the hotkey → product id table.** `P1SW1` (`d209:0420`) and
+`P1SW4` (`d209:0421`) are recorded. `P1SW2`, `P1SW3` and `P1SW5` are not, and
+filling them in would let `IPAC2_MODES` name the exact mode rather than the
+device class — a `0421` board could be in mode 2 or mode 4 and the descriptor
+does not say which.
 
-**Record the whole hotkey → product id table.** Still open: `P1SW4` is documented as Dinput and was observed producing Xinput, so
-the mapping cannot be trusted from the documentation at all. It is a ten
-minute job, and it settles several other questions at once. From keyboard
-mode, for each of `P1SW2`..`P1SW5`:
+**The ten axis codes per block.** `0x9d`–`0xa6` and `0xb6`–`0xbf` are inferred
+from the block arithmetic, with `0x9d` moving `ABS_X` as the only measurement.
+Nothing has needed them; a trackball or spinner would.
 
-```sh
-# hold Start1 + P1SWn for ten seconds, count the led flashes, then:
-lsusb | grep -iE "d209|045e:028e"
-ipacconf.py list
-ipacconf.py dump -o /tmp/mode-n.json     # only where a config node exists
-# back to a known state before the next one:
-# hold Start1+P1SW1 for ten seconds
-```
-
-Three things fall out of it:
-
-1. Which hotkey actually reaches a **Dinput** mode that this tool can write.
-2. Whether mode 2 and mode 4 report different product ids. If they do,
-   `IPAC2_MODES` can name the exact mode instead of the device class.
-3. Whether a dump taken in a **user set** gamepad mode matches what was last
-   written. If it does, the "stale Dinput read" note retires for good.
-
-**Test the automatic mode switch.** Write a *genuinely* gamepad-only config in
-keyboard mode — every pin including the sticks, and every alternate action
-cleared — and watch `lsusb`. If the board re-enumerates on its own, the
-automatic switch works and there is no missing command. Note this also
-disarms the mode hotkeys, so plan on the `P1SW1`-on-power-up route back.
-
-**Mode switching from the CLI and UI.** Only if (2) fails. The command is not
-public and is not in either open-source implementation. Get it by capturing
-WinIPAC doing *File → Force Board Reconfiguration* — switch to Dinput and back
-to keyboard in one recording, so both directions can be diffed against each
-other. Look for a `SET_REPORT` whose header byte is neither `0x50` (write) nor
-`0x59` (read). Try the trailing `0x59 0xdd 0x0f` from the JPAC path first; it
-is one message and it is already in someone else's source. Gate any Xinput
-switch behind a confirmation until a config read is confirmed to work in
-Xinput: if it does not, that is the one switch the tool cannot undo.
+**Firmware 1.57** adds a pin that can be assigned as a mode-change button,
+which would be writable from here. It is beta, the upgrade path is
+Windows-only through WinIPAC, and it buys a physical button rather than
+software switching — see the bootloader notes above.
 
 ## Status
 
@@ -825,11 +880,16 @@ Two hardware findings that changed the model, not just the code:
 - **Dinput never commits a write to flash.** It applies to RAM, acts on it
   immediately, and reverts on the next power cycle, silently. Write in
   keyboard mode.
-- **A dump taken in Dinput does not report the live config**, but the board
-  still acts on it. Writing `HAT 1` on the four directions in keyboard mode is
-  what makes Batocera accept the stick as a d-pad in Dinput — the fix for a
-  well-known "Batocera sees the I-PAC pads but the joystick does nothing"
-  complaint. Verify by behaviour, or by dumping in keyboard mode.
+- **A dump taken in a preset gamepad mode does not report your config**,
+  because those modes run a fixed internal map and ignore the config block.
+  Dump in keyboard mode, or judge by behaviour.
+- **The stick has to be on the hat codes.** Four separate buttons are not a
+  d-pad as far as EmulationStation is concerned, and opposite directions must
+  be adjacent codes so they land on the same axis — split them across two and
+  the hat never centres, which reads as a sluggish, sticky stick rather than a
+  plainly wrong one.
+- **Each player needs its own block of codes.** The board reads the code, not
+  the pin group, to decide which controller a press belongs to.
 
 Six bugs the hardware found, all fixed:
 
