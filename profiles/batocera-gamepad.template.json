@@ -1,6 +1,6 @@
 {
-  "_comment": "NOT NEEDED FOR NORMAL USE, AND UNVERIFIED. On firmware 1.50+ the board becomes two game controllers simply by switching to Dinput mode (hold Start1+P1SW2 for 10 seconds); the pin-to-button mapping is internal and the config block is not involved - a keyboard-mode dump and a Dinput-mode dump are byte-identical. This file exists only for the untested case of wanting custom per-pin gamepad button assignments.",
-  "_sticks_note": "Stick pins (1up/1down/1left/1right, 2up/...) carry a description but no action on purpose. Pins a profile does not assign an action to keep whatever the board already has, so this file will not break your sticks. The descriptions record what Batocera expects each direction to be; whether the board wants HAT 0..3, ANALOG 0..7 or GAMEPAD codes to produce it is the open question the dump diff answers - add an \"action\" to these four pins per player once known.",
+  "_comment": "OPTIONAL, AND NOT CONFIRMED ON HARDWARE. On firmware 1.50+ the board becomes two game controllers with a fixed internal pin-to-button map simply by switching to mode 2 (hold Start1+P1SW2 for 10 seconds), no config involved. This file is for the other case: choosing which button each pin sends, which needs mode 4 (Start1+P1SW4) - the Dinput mode that acts on the config. Mode 2 ignores it.",
+  "_sticks_note": "Stick pins (1up/1down/1left/1right, 2up/...) carry a description but no action on purpose. Pins a profile does not assign an action keep whatever the board already has, so this file will not break your sticks - but see _incomplete_note for what that costs. The descriptions record what Batocera expects each direction to be; HAT 1 on all four is the value confirmed to make EmulationStation read them as a d-pad.",
   "_description_note": "\"description\" is a label only. It is what the web UI shows next to the pin; the board is programmed from \"action\". Both players send GAMEPAD 1..12 because in Dinput mode each player is a separate controller and the two share one code range - the GP1/GP2 prefix is for the reader, not the board.",
   "schemaVersion": 2.0,
   "resourceType": "ipac2-pins",
@@ -160,5 +160,8 @@
       "action": "GAMEPAD 12",
       "description": "GP2 Hotkey"
     }
-  ]
+  ],
+  "_incomplete_note": "This template cannot trigger Ultimarc's automatic mode switch, because it is not gamepad-only once encoded. The board switches to mode 4 by itself only when the whole 256-byte download is gamepad actions, and this file leaves the eight stick pins unassigned and never clears the alternate (shifted) actions - so applied to a factory board, fifteen keycodes survive and the download is mixed. `apply` says so. Either finish the file, or switch mode by hand with Start1+P1SW4.",
+  "_hotkey_warning": "Confirmed on hardware: written as-is in keyboard mode, this file leaves the board unable to switch modes. Start1+P1SW1-5 needs 1start (the shift key) and 1sw1..1sw5, and this file puts GAMEPAD actions on all six - which do nothing in keyboard mode. The way back is holding P1SW1 while plugging in usb. `apply` warns about this before writing.",
+  "_numbering_note": "GAMEPAD n here means what WinIPAC calls 'P1 Button n' and what the host sees as button n. GAMEPAD 1 is 0x8e. Earlier versions of ipacconf numbered from 0x90, so this file used to send button 3 where it said GAMEPAD 1; corrected against hardware, see README.md."
 }

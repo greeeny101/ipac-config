@@ -158,22 +158,65 @@ Configure it once, and let the board remember.
 **Getting the joystick working in Dinput.** If Batocera detects the I-PAC pads
 but the stick does nothing, the board's stock map has the four directions on
 separate buttons and EmulationStation will not take those as a d-pad. Write a
-profile with the directions on `HAT 1` — in keyboard mode — then switch to
-Dinput:
+profile with the directions on the **hat** codes — in keyboard mode — then
+switch to Dinput:
 
 ```sh
-# hold Start1+P1SW1 ten seconds -> keyboard
-ipacconf.py apply /userdata/system/ipac-config/profiles/your-gamepad.json
-# hold Start1+P1SW2 ten seconds -> Dinput
+# hold Start1+P1SW1 ten seconds -> keyboard (mode 1)
+cd /userdata/system/ipac-config
+python3 ipacconf.py apply profiles/gamepad.json
+# hold Start1+P1SW4 ten seconds -> Dinput, mode 4
 ```
 
-`dump` does not report the live config while in Dinput, so check your work in
-keyboard mode or by behaviour, not by dumping in Dinput.
+`profiles/gamepad.json` assigns all 32 pins and clears every alternate action,
+which is what keeps the download entirely gamepad actions. Each player gets
+its own block of codes — `HAT 0 …` and `GAMEPAD 0`–`10` for player 1,
+`P2 HAT …` and `P2 GAMEPAD 0`–`10` for player 2. That split matters: the board
+reads the code, not the pin group, to decide which controller a press belongs
+to, so giving both players the same codes puts every press on controller 1 and
+makes player 2's buttons mirror player 1's.
+
+**Use `P1SW4`, not `P1SW2`.** There are five modes on 1.50+ firmware, and
+`P1SW2` reaches mode 2 — the Dinput *preset*, which runs a fixed internal map
+and ignores the config block entirely, so a profile checked there looks like it
+was never written. `P1SW4` is mode 4, the Dinput mode that uses your config:
+confirmed on hardware, the led flashes four times and the board comes up
+`d209:0421`. `Start1+P1SW1`, or holding `P1SW1` while plugging in USB, always
+gets you back.
+
+Do not pass `--xinput` unless you mean it. It marks the config as an Xinput
+one, and the board then comes up as an Xbox 360 pad with no config interface
+at all — `apply` warns first.
+
+`dump` does not report your config while in a preset gamepad mode, so check
+your work in keyboard mode or by behaviour.
+
+**A gamepad profile can disarm the mode hotkeys.** Start1+P1SW1-5 needs those
+six pins to be doing something the board's current mode understands, and a
+gamepad profile puts `GAMEPAD` actions on all six — which are inert in
+keyboard mode. Written in keyboard mode, such a profile leaves no working
+hotkey to reach the gamepad mode it was written for. The way back is holding
+`P1SW1` while plugging in the USB cable, which ignores the config entirely.
+`apply` warns before writing anything that would do this.
+
+**Batocera needs configuring too.** The board sending correct events is only
+half of it: EmulationStation maps them in
+`/userdata/system/configs/emulationstation/es_input.cfg`, written by MAIN MENU
+→ CONTROLLERS & BLUETOOTH SETTINGS → CONFIGURE A CONTROLLER. Both players
+report the same USB ids, so they share one `deviceGUID` and one config block —
+mapping either one maps both. ES menus only ever respond to player 1, so test
+player 2 inside a game rather than in the menu.
 
 **One caveat on persistence.** That only holds for a write made in keyboard mode. In Dinput
 the board takes the write, acts on it, and never commits it — so the config
 looks right until the next power cycle and then reverts. `apply` refuses to
 write in Dinput for this reason. If you want the board in Dinput, switch to
 keyboard (`Start1+P1SW1`, ten seconds), write, then switch back with
-`Start1+P1SW2`; the mode is not part of the config, so the switch back leaves
+`Start1+P1SW4`; the mode is not part of the config, so the switch back leaves
 your profile alone.
+
+`apply` also reports which way it expects the mode to go. The board chooses
+its mode from what it is sent, but only when the download is entirely one kind
+or the other. Pins your profile does not assign, and alternate (shifted)
+actions it does not clear, keep whatever the board already had — which is how
+a gamepad profile ends up mixed by accident and the switch never fires.
