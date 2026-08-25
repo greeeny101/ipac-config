@@ -135,7 +135,7 @@ up first like any other write.
 
 The UI's *Saved configurations* card lists two places: the backup directory,
 which fills up on its own because every write backs up first, and the
-`profiles/` shipped next to the script. A file from the browsing phone or
+`profiles/` shipped beside the package. A file from the browsing phone or
 laptop can be dropped in with the file picker.
 
 Each saved file offers two different things, and the distinction matters:
@@ -854,7 +854,7 @@ two.
 python3 -m unittest test_ipacconf.py
 ```
 
-318 tests, no hardware required. Six groups matter most:
+324 tests, no hardware required. Seven groups matter most:
 `decode(encode(x)) == x` byte-for-byte, which is what makes read-modify-write
 trustworthy; `TestRealBoardDump`, which checks the pin table against a capture
 from an actual board — every pin decoding to its factory MAME default is
@@ -868,7 +868,10 @@ synthetic tshark dump, so the "every message has a header" mistake cannot come
 back and bury the one message a capture exists to find; and
 `TestShippedGamepadProfile`, which holds the working cabinet's map in place —
 each direction on the code that means it, opposite directions adjacent so they
-share an axis, and no code shared between the two players.
+share an axis, and no code shared between the two players; and
+`TestCollectChecks`, which keeps the pre-write warnings in one ordered list,
+since the CLI and the web UI running their own sets is how `restore` came to
+be the one route that could disarm the mode hotkeys silently.
 
 ## Next
 
