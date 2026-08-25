@@ -167,37 +167,64 @@ DPAD_DIRECTIONS = ("UP", "DOWN", "LEFT", "RIGHT")  # in code order, measured
 # said neither, and the order being wrong is the failure that actually happens.
 DPAD_NAME = "HAT 0 %s"
 
-GAME_CODES = {}
-# Registered before GAMEPAD so these win when a byte is decoded back to a name:
-# 0x99 is the d-pad, whatever an older profile called it. The named form wins
-# over the numbered one, because "DPAD UP" is checkable by reading it and
-# "DPAD 1" is not - and the order being wrong is the failure that actually
-# happens.
-# Player 2's block, registered first so it wins when a byte is decoded: those
-# codes are player 2 controls, not high-numbered player 1 buttons.
-for _n in range(0, GAMEPAD_BUTTONS_CONFIRMED):
-    GAME_CODES["P2 GAMEPAD %d" % _n] = P2_FIRST_CODE + _n
-for _n, _dir in enumerate(DPAD_DIRECTIONS):
-    GAME_CODES["P2 HAT %s" % _dir] = P2_FIRST_CODE + GAMEPAD_BUTTONS_CONFIRMED + _n
+def _build_game_codes() -> dict:
+    """Every game-controller action name, in the order registration matters.
 
-for _n, _dir in enumerate(DPAD_DIRECTIONS):
-    GAME_CODES[DPAD_NAME % _dir] = DPAD_FIRST_CODE + _n
-# Kept so profiles written before the codes were measured still apply.
-for _n, _dir in enumerate(DPAD_DIRECTIONS):
-    GAME_CODES["DPAD %s" % _dir] = DPAD_FIRST_CODE + _n
-for _n in range(1, DPAD_COUNT + 1):
-    GAME_CODES["DPAD %d" % _n] = DPAD_FIRST_CODE + _n - 1
-for _n in range(0, GAMEPAD_COUNT):
-    GAME_CODES["GAMEPAD %d" % _n] = GAMEPAD_FIRST_CODE + _n
-for _n in range(0, 8):
-    GAME_CODES["ANALOG %d" % _n] = 0xB0 + _n  # unverified; see PLAYER_BLOCK
-# QtPyUltimarc puts hats at 0xBA..0xBD. Measured, this board's hat is at
-# 0x99..0x9c - see DPAD_FIRST_CODE - so those names are not registered: they
-# were never verified, they contradict what the hardware does, and having two
-# things called "HAT n" is how a stick ends up on codes that do nothing.
-# 0xBA..0xBD still round-trip, as literal 0xNN.
-for _n, _name in enumerate(["X1", "X2", "Y1", "Y2", "Z1", "Z2"]):
-    GAME_CODES["TRACKBALL %s" % _name] = 0xC0 + _n
+    A function rather than a run of module-level loops so its counters stay
+    out of the module namespace - the same reason _build_linux_to_board is
+    one. Registration order is not cosmetic: the first name a byte gets is
+    the one it decodes back to, so the comments below are the spec.
+    """
+    codes = {}
+    # Registered before GAMEPAD so these win when a byte is decoded back to a
+    # name: 0x99 is the d-pad, whatever an older profile called it. The named
+    # form wins over the numbered one, because "DPAD UP" is checkable by
+    # reading it and "DPAD 1" is not - and the order being wrong is the
+    # failure that actually happens.
+    # Player 2's block, registered first so it wins when a byte is decoded:
+    # those codes are player 2 controls, not high-numbered player 1 buttons.
+    for n in range(0, GAMEPAD_BUTTONS_CONFIRMED):
+        codes["P2 GAMEPAD %d" % n] = P2_FIRST_CODE + n
+    for n, direction in enumerate(DPAD_DIRECTIONS):
+        codes["P2 HAT %s" % direction] = (
+            P2_FIRST_CODE + GAMEPAD_BUTTONS_CONFIRMED + n)
+
+    for n, direction in enumerate(DPAD_DIRECTIONS):
+        codes[DPAD_NAME % direction] = DPAD_FIRST_CODE + n
+    # Kept so profiles written before the codes were measured still apply.
+    for n, direction in enumerate(DPAD_DIRECTIONS):
+        codes["DPAD %s" % direction] = DPAD_FIRST_CODE + n
+    for n in range(1, DPAD_COUNT + 1):
+        codes["DPAD %d" % n] = DPAD_FIRST_CODE + n - 1
+    for n in range(0, GAMEPAD_COUNT):
+        codes["GAMEPAD %d" % n] = GAMEPAD_FIRST_CODE + n
+    for n in range(0, 8):
+        codes["ANALOG %d" % n] = 0xB0 + n  # unverified; see PLAYER_BLOCK
+    # QtPyUltimarc puts hats at 0xBA..0xBD. Measured, this board's hat is at
+    # 0x99..0x9c - see DPAD_FIRST_CODE - so those names are not registered:
+    # they were never verified, they contradict what the hardware does, and
+    # having two things called "HAT n" is how a stick ends up on codes that do
+    # nothing. 0xBA..0xBD still round-trip, as literal 0xNN.
+    for n, axis in enumerate(["X1", "X2", "Y1", "Y2", "Z1", "Z2"]):
+        codes["TRACKBALL %s" % axis] = 0xC0 + n
+    return codes
+
+
+def invert_first_wins(mapping: dict) -> dict:
+    """Flip a mapping, the first key to claim a value keeping it.
+
+    Both directions of the name/byte tables are built this way, and both
+    depend on "first wins" rather than "last wins": CODE_NAMES so "\\\\"
+    decodes to "\\\\" rather than "NON US \\\\", and BOARD_TO_LINUX so a board
+    code reverses to the keycode most likely to have produced it.
+    """
+    flipped = {}
+    for key, value in mapping.items():
+        flipped.setdefault(value, key)
+    return flipped
+
+
+GAME_CODES = _build_game_codes()
 
 CODE_GROUPS = [
     ("Keyboard", KEY_CODES),
@@ -206,14 +233,11 @@ CODE_GROUPS = [
     ("System / media", SYSTEM_CODES),
 ]
 
-ALL_CODES = {}
-for _label, _table in CODE_GROUPS:
-    ALL_CODES.update(_table)
+ALL_CODES = {
+    name: code for _, table in CODE_GROUPS for name, code in table.items()
+}
 
-# First name wins, so "\\" decodes to "\\" rather than "NON US \\".
-CODE_NAMES = {}
-for _name, _value in ALL_CODES.items():
-    CODE_NAMES.setdefault(_value, _name)
+CODE_NAMES = invert_first_wins(ALL_CODES)
 
 NONE = ""  # an unassigned action
 

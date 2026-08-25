@@ -8,7 +8,7 @@ from __future__ import annotations
 
 import struct
 
-from ..codes import CODE_NAMES, SYSTEM_CODES
+from ..codes import CODE_NAMES, SYSTEM_CODES, invert_first_wins
 
 EV_SYN = 0x00
 EV_KEY = 0x01
@@ -123,6 +123,5 @@ def _build_linux_to_board() -> dict:
 
 
 LINUX_TO_BOARD = _build_linux_to_board()
-BOARD_TO_LINUX = {}
-for _keycode, _value in LINUX_TO_BOARD.items():
-    BOARD_TO_LINUX.setdefault(_value, _keycode)
+# Earliest keycode wins, same rule as the table above was built with.
+BOARD_TO_LINUX = invert_first_wins(LINUX_TO_BOARD)
