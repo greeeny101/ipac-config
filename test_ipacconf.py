@@ -2635,5 +2635,76 @@ class TestBoardOnTheBusWithNoHidNode(unittest.TestCase):
         self.assertNotIn("Start1+P1SW1", reason)
 
 
+class TestCollectChecks(unittest.TestCase):
+    """One list of checks, so the CLI and the web UI cannot drift apart.
+
+    They used to run their own sets: `restore` on the command line skipped
+    the hotkey check entirely, so it was the one route that could disarm
+    Start1+P1SW1-5 without saying so.
+    """
+
+    @staticmethod
+    def _info(product=0x0420):
+        return ic.DeviceInfo("/dev/hidraw0", ic.VENDOR_2015, product, 0x0055, 2, "1-1")
+
+    @staticmethod
+    def _raw(actions, shift="1start", xinput=False):
+        buf = bytearray(ic.CONFIG_SIZE)
+        buf[0], buf[1], buf[2] = ic.HEADER_WRITE
+        if xinput:
+            buf[3] |= ic.XINPUT_BIT
+        for name in ic.PIN_ORDER:
+            buf[4 + ic.PIN_TABLE[name][2]] = 0x01
+        if shift:
+            buf[4 + ic.PIN_TABLE[shift][2]] = 0x01 | ic.SHIFT_BIT
+        for name, action in actions.items():
+            buf[4 + ic.PIN_TABLE[name][0]] = ic.name_to_code(action)
+        return bytes(buf)
+
+    def test_a_clean_config_has_nothing_to_say(self):
+        raw = self._raw({"1start": "1", "1sw1": "CTRL L"})
+        self.assertEqual(ic.collect(raw, self._info()), [])
+
+    def test_every_key_is_one_of_the_declared_checks(self):
+        keys = {key for key, _ in ic.CHECKS}
+        raw = self._raw({"1start": "GAMEPAD 9"}, xinput=True)
+        found = ic.collect(raw, self._info(), profile={"pins": []})
+        self.assertTrue(found, "this config should trip several checks")
+        for item in found:
+            self.assertIn(item["key"], keys)
+            self.assertIn(item["level"], ("warning", "note"))
+            self.assertTrue(item["text"])
+
+    def test_results_come_back_loudest_first(self):
+        """Xinput before the hotkeys: it is the one that costs the interface."""
+        raw = self._raw({"1start": "GAMEPAD 9"}, xinput=True)
+        keys = [item["key"] for item in ic.collect(raw, self._info())]
+        self.assertIn("xinput", keys)
+        self.assertIn("hotkey", keys)
+        self.assertLess(keys.index("xinput"), keys.index("hotkey"))
+        order = [key for key, _ in ic.CHECKS]
+        self.assertEqual(keys, sorted(keys, key=order.index))
+
+    def test_the_gamepad_check_is_skipped_without_a_profile(self):
+        """It reads the requested actions, not the bytes, so it needs one."""
+        raw = self._raw({"1start": "GAMEPAD 9"})
+        keys = [item["key"] for item in ic.collect(raw, self._info(), profile=None)]
+        self.assertNotIn("gamepad", keys)
+
+    def test_find_returns_the_text_or_none(self):
+        raw = self._raw({"1start": "GAMEPAD 9"})
+        found = ic.collect(raw, self._info())
+        self.assertIn("1start", ic.find(found, "hotkey"))
+        self.assertIsNone(ic.find(found, "xinput"))
+
+    def test_collect_agrees_with_the_checks_called_directly(self):
+        raw = self._raw({"1start": "GAMEPAD 9"}, xinput=True)
+        info = self._info()
+        found = ic.collect(raw, info)
+        self.assertEqual(ic.find(found, "hotkey"), ic.hotkey_warning(raw))
+        self.assertEqual(ic.find(found, "xinput"), ic.xinput_warning(raw, info))
+        self.assertEqual(ic.find(found, "mode"), ic.mode_switch_note(raw, info))
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -18,9 +18,11 @@ From your machine (default Batocera login is `root` / `linux`):
 
 ```sh
 ssh root@batocera "mkdir -p /userdata/system/ipac-config"
-scp ipacconf.py root@batocera:/userdata/system/ipac-config/
-scp -r profiles root@batocera:/userdata/system/ipac-config/
+scp -r ipacconf profiles root@batocera:/userdata/system/ipac-config/
 ```
+
+Both are directories. `profiles` has to sit *beside* `ipacconf` rather than
+inside it — that is where the tool looks for the shipped presets.
 
 Substitute the cabinet's IP if the `batocera` hostname doesn't resolve — find
 it in EmulationStation under **MAIN MENU → NETWORK SETTINGS**, or run `ip a`
@@ -31,8 +33,8 @@ Check it before automating anything:
 ```sh
 ssh root@batocera
 cd /userdata/system/ipac-config
-python3 ipacconf.py list
-python3 ipacconf.py dump -o /userdata/system/ipac-backups/before.json
+python3 ipacconf list
+python3 ipacconf dump -o /userdata/system/ipac-backups/before.json
 ```
 
 `list` should name the board, its firmware and the config interface. If `dump`
@@ -86,7 +88,7 @@ Edit the variables at the top of `/userdata/system/services/ipacconf`:
 |---|---|---|
 | `PORT` | `8080` | Batocera's own EmulationStation web server uses 1234, so 8080 is normally free. Check with `netstat -tuln \| grep 8080` |
 | `HOST` | `0.0.0.0` | All interfaces, so the UI is reachable from your LAN. Set `127.0.0.1` to restrict it to the cabinet |
-| `DIR` | `/userdata/system/ipac-config` | Where `ipacconf.py` lives |
+| `DIR` | `/userdata/system/ipac-config` | The directory holding `ipacconf/` and `profiles/` |
 
 There is no authentication — this is a tool for a machine on your own network.
 If that isn't your situation, bind it to `127.0.0.1` and reach it over an SSH
@@ -118,7 +120,7 @@ being seen — check `lsusb | grep -i d209`.
 part of the tool. Try the board's other hidraw nodes explicitly:
 
 ```sh
-for n in /dev/hidraw*; do echo "== $n"; python3 ipacconf.py --device $n dump | head -3; done
+for n in /dev/hidraw*; do echo "== $n"; python3 ipacconf --device $n dump | head -3; done
 ```
 
 **Batocera v42 or older.** Services work from v33 onwards, so this applies
@@ -164,7 +166,7 @@ switch to Dinput:
 ```sh
 # hold Start1+P1SW1 ten seconds -> keyboard (mode 1)
 cd /userdata/system/ipac-config
-python3 ipacconf.py apply profiles/gamepad.json
+python3 ipacconf apply profiles/gamepad.json
 # hold Start1+P1SW4 ten seconds -> Dinput, mode 4
 ```
 

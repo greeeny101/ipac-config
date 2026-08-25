@@ -30,14 +30,16 @@ case "${1}" in
             echo "ipacconf already running (pid $(cat "${PIDFILE}"))"
             exit 0
         fi
-        if [ ! -f "${DIR}/ipacconf.py" ]; then
-            echo "ipacconf: ${DIR}/ipacconf.py not found" >&2
+        # A directory, not a file: the tool is a Python package now, and
+        # python3 runs one by executing the __main__.py inside it.
+        if [ ! -d "${DIR}/ipacconf" ]; then
+            echo "ipacconf: ${DIR}/ipacconf not found" >&2
             exit 1
         fi
         mkdir -p "${LOGDIR}"
         # Background it: S99 waits for services to return, so a blocking
         # server here would stall the boot.
-        "${PYTHON}" "${DIR}/ipacconf.py" serve --host "${HOST}" --port "${PORT}" \
+        "${PYTHON}" "${DIR}/ipacconf" serve --host "${HOST}" --port "${PORT}" \
             >>"${LOG}" 2>&1 &
         echo $! > "${PIDFILE}"
         echo "ipacconf started on port ${PORT} (pid $(cat "${PIDFILE}"))"

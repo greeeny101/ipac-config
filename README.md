@@ -4,12 +4,15 @@ Configure an Ultimarc I-PAC 2 (2015+, USB `d209:0420`) from Linux — including
 directly on a Batocera arcade cabinet, where Ultimarc's Windows-only WinIPAC
 cannot go.
 
-One file, standard library only. No pip, no libusb, no udev rules, no kernel
-driver detaching. Deploying it is a copy:
+Standard library only. No pip, no libusb, no udev rules, no kernel driver
+detaching. Deploying it is a copy:
 
 ```sh
-scp ipacconf.py root@batocera:/userdata/system/ipac-config/
+scp -r ipacconf profiles root@batocera:/userdata/system/ipac-config/
 ```
+
+`ipacconf` is a directory — Python runs one by executing the `__main__.py`
+inside it, so `python3 ipacconf serve` is all the cabinet needs.
 
 To have the web UI come up automatically whenever the cabinet boots, see
 [`batocera/README.md`](batocera/README.md) — it installs
@@ -18,14 +21,14 @@ To have the web UI come up automatically whenever the cabinet boots, see
 ## Use
 
 ```sh
-python3 ipacconf.py list                      # what's attached, firmware, config interface
-python3 ipacconf.py dump -o before.json       # read the board  ← do this first
-python3 ipacconf.py apply p.json --dry-run    # annotated byte diff, writes nothing
-python3 ipacconf.py apply p.json              # write it (backs up first)
-python3 ipacconf.py restore before.json       # byte-exact restore (backs up first)
-python3 ipacconf.py saved                     # list backups and shipped presets
-python3 ipacconf.py monitor                   # name the pin behind each button press
-python3 ipacconf.py serve                     # web UI on :8080
+python3 ipacconf list                      # what's attached, firmware, config interface
+python3 ipacconf dump -o before.json       # read the board  ← do this first
+python3 ipacconf apply p.json --dry-run    # annotated byte diff, writes nothing
+python3 ipacconf apply p.json              # write it (backs up first)
+python3 ipacconf restore before.json       # byte-exact restore (backs up first)
+python3 ipacconf saved                     # list backups and shipped presets
+python3 ipacconf monitor                   # name the pin behind each button press
+python3 ipacconf serve                     # web UI on :8080
 ```
 
 Reading `/dev/hidraw*` needs root. On Batocera you already are; elsewhere use
@@ -59,7 +62,7 @@ what has gone wrong when an action turns up on the wrong control.
 control on the cabinet and it names the pin the press came from.
 
 ```sh
-python3 ipacconf.py monitor
+python3 ipacconf monitor
 ```
 ```
 watching /dev/input/event7  Ultimarc Ultimarc IPAC 2
@@ -108,7 +111,7 @@ Off the cabinet, `--fake-input` replays a script through the same translation
 and matching path:
 
 ```sh
-python3 ipacconf.py serve --fake-device fixtures/ipac2-1.55-keyboard.json \
+python3 ipacconf serve --fake-device fixtures/ipac2-1.55-keyboard.json \
                           --fake-input fixtures/input-keyboard-mode.jsonl
 ```
 
@@ -132,7 +135,7 @@ up first like any other write.
 
 The UI's *Saved configurations* card lists two places: the backup directory,
 which fills up on its own because every write backs up first, and the
-`profiles/` shipped next to the script. A file from the browsing phone or
+`profiles/` shipped beside the package. A file from the browsing phone or
 laptop can be dropped in with the file picker.
 
 Each saved file offers two different things, and the distinction matters:
@@ -152,7 +155,7 @@ labelled — the name is stored inside the file, so a copy keeps it — download
 to the device browsing, or deleted. Presets are read only. Restoring backs up
 what was on the board first, so a restore is itself undoable.
 
-`python3 ipacconf.py saved` prints the same listing over SSH.
+`python3 ipacconf saved` prints the same listing over SSH.
 
 ## Profiles
 
@@ -322,7 +325,7 @@ the buttons on the button codes:
 ```sh
 # 1. keyboard mode - the only mode that commits to flash
 #    hold Start1+P1SW1 for ten seconds
-ipacconf.py apply profiles/gamepad.json
+ipacconf apply profiles/gamepad.json
 # 2. hold Start1+P1SW4 for ten seconds -> Dinput, mode 4 (user set)
 #    NOT P1SW2, which is mode 2 and ignores what you just wrote
 ```
@@ -809,13 +812,49 @@ The ten axis codes at the top of each block are the one part still inferred:
 25 minus 11 minus 4, with `0x9d` moving `ABS_X` as the only direct evidence.
 Nothing has needed them.
 
+## Layout
+
+```
+ipacconf/
+├── __main__.py    python3 ipacconf ...
+├── version.py     the version number
+├── errors.py      ProtocolError, DeviceError, ReadOnlyError
+├── identity.py    which usb ids are an I-PAC 2, and what mode each means
+├── firmware.py    what a given firmware can do, keyed by bcdDevice
+├── protocol.py    report sizes, headers, config bits, HID framing
+├── linux.py       ioctl request numbers and sysfs reads
+├── pins.py        where each pin's three bytes live in the data array
+├── codes.py       action codes and the names we give them
+├── codec.py       encode/decode a 256 byte config - pure, no I/O
+├── device.py      finding boards, and /dev/hidrawN - plus FakeBoard
+├── checks.py      the warnings raised before a write
+├── profiles.py    loading profiles, the built-in default, backups
+├── library.py     the saved-configuration library the UI browses
+├── cli.py         one function per subcommand, plus the parser
+├── inputs/        keymap → events → devices → monitor
+└── web/           monitors → service → handler → server
+    └── static/    index.html · app.css · app.js
+```
+
+Each module may import the ones above it and none of the ones below. Modules
+import their siblings directly (`from .codec import ...`) and never from the
+package itself, which is a one-way facade re-exporting the public names so
+`import ipacconf` still reaches all of them.
+
+The web layer is split so the UI can be replaced without touching anything
+else. `web/service.py` holds every operation the UI performs and knows nothing
+about HTTP — no `http.server` import, no request objects. `web/handler.py` is
+the only module that touches a request, and `web/static/` is plain
+HTML/CSS/JS. A different front end reuses the service and replaces the other
+two.
+
 ## Tests
 
 ```sh
 python3 -m unittest test_ipacconf.py
 ```
 
-318 tests, no hardware required. Six groups matter most:
+324 tests, no hardware required. Seven groups matter most:
 `decode(encode(x)) == x` byte-for-byte, which is what makes read-modify-write
 trustworthy; `TestRealBoardDump`, which checks the pin table against a capture
 from an actual board — every pin decoding to its factory MAME default is
@@ -829,7 +868,10 @@ synthetic tshark dump, so the "every message has a header" mistake cannot come
 back and bury the one message a capture exists to find; and
 `TestShippedGamepadProfile`, which holds the working cabinet's map in place —
 each direction on the code that means it, opposite directions adjacent so they
-share an axis, and no code shared between the two players.
+share an axis, and no code shared between the two players; and
+`TestCollectChecks`, which keeps the pre-write warnings in one ordered list,
+since the CLI and the web UI running their own sets is how `restore` came to
+be the one route that could disarm the mode hotkeys silently.
 
 ## Next
 
