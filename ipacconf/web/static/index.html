@@ -1,0 +1,113 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>I-PAC 2 configurator</title>
+<link rel="stylesheet" href="/static/app.css">
+</head>
+<body>
+<header>
+  <h1>I-PAC 2 configurator</h1>
+  <p class="muted">Reads and writes the board's flash over USB. Every write is
+  preceded by an automatic backup.</p>
+</header>
+<main>
+  <div class="card" id="device"><span class="muted">looking for the board...</span></div>
+
+  <div class="card">
+    <div class="row">
+      <button id="read">Read from board</button>
+      <button id="preview">Preview changes</button>
+      <button id="write" class="primary">Write to board</button>
+      <button id="download">Download JSON</button>
+      <button id="clear">Reset all pins</button>
+    </div>
+    <label class="row" style="margin-top:.6rem;gap:.4rem;align-items:flex-start">
+      <input type="checkbox" id="xinput">
+      <span class="muted">Mark this config as <strong>Xinput</strong> &mdash; the
+      board comes up as an Xbox 360 pad instead of a Dinput controller. This is
+      the bit WinIPAC's <em>File &rarr; Force Board Reconfiguration</em> sets.
+      <strong>There is no config interface in Xinput</strong>, so this page cannot
+      reach the board afterwards; hold Start1+P1SW4 for 10s to get back to Dinput.
+      Leave it as it is to keep whatever the board already has.</span>
+    </label>
+    <div id="status"></div>
+  </div>
+
+  <div class="card">
+    <h2 style="margin-top:0">Changing mode</h2>
+    <p class="muted">There are five modes, and the one that matters is
+    <strong>preset versus user set</strong>: the preset gamepad modes run a fixed
+    internal map and ignore the configuration entirely, so nothing written here
+    has any effect in them. Hold for a full 10 seconds:</p>
+    <table>
+      <tr><th>hold</th><th>gives</th><th>notes</th></tr>
+      <tr><td class="pin">Start1 + P1SW1</td><td>1 &mdash; keyboard</td>
+          <td class="muted">sends keycodes; uses your config</td></tr>
+      <tr><td class="pin">Start1 + P1SW2</td><td>2 &mdash; Dinput preset</td>
+          <td class="muted"><strong>ignores your config</strong> and runs a fixed
+          internal map</td></tr>
+      <tr><td class="pin">Start1 + P1SW3</td><td>3 &mdash; Xinput preset</td>
+          <td class="muted"><strong>ignores your config</strong>; this tool also
+          cannot reach the board in Xinput</td></tr>
+      <tr><td class="pin">Start1 + P1SW4</td><td>4 &mdash; Dinput user set</td>
+          <td class="muted">two game controllers, <strong>using your config</strong>
+          &mdash; this is the gamepad mode you want. Confirmed on hardware
+          (d209:0421)</td></tr>
+      <tr><td class="pin">Start1 + P1SW5</td><td>5 &mdash; Xinput user set</td>
+          <td class="muted">uses your config, but this tool cannot reach the board
+          in Xinput</td></tr>
+    </table>
+    <p class="muted">The mode is not stored in the configuration &mdash; it is a
+    property of how the board presents itself over USB. But the board does
+    <em>choose</em> its mode from what it is sent: a download that is entirely
+    keyboard actions moves it to mode 1, one that is entirely gamepad actions
+    moves it to mode 4. A download mixing the two leaves the mode alone, and
+    unassigned pins keep whatever the board already had &mdash; which is how a
+    gamepad profile ends up mixed without anyone meaning it to.</p>
+    <p class="muted">Start1 must be the shift key for these to work, and the
+    pin it is on must carry a keycode &mdash; a gamepad action there is inert in
+    keyboard mode and the hotkeys stop responding. If a switch goes wrong, hold
+    P1SW1 while plugging in the USB cable to force keyboard mode; that route
+    ignores the configuration entirely and always works.</p>
+  </div>
+
+  <div class="card">
+    <h2 style="margin-top:0">Saved configurations</h2>
+    <p class="muted"><strong>Load into form</strong> fills the dropdowns below so
+    you can review and edit before writing - pins the file does not name keep
+    what the board already has. <strong>Restore exactly</strong> writes all 256
+    bytes straight back, including macros the form cannot show. Either way the
+    board's current config is backed up first.</p>
+    <div id="saved"><span class="muted">looking for saved files...</span></div>
+    <div id="savedStatus"></div>
+    <div class="row" style="margin-top:.75rem">
+      <label class="muted" for="upload">From this device:</label>
+      <input type="file" id="upload" accept="application/json,.json">
+    </div>
+    <div id="uploadRow"></div>
+  </div>
+
+  <div class="card">
+    <h2 style="margin-top:0">Live input</h2>
+    <p class="muted">Press a control on the cabinet and the pin it came from
+    lights up in the table below. Use it to find an action sitting on the wrong
+    pin: if pressing P1 button 1 lights up <span class="pin">1sw3</span>, that
+    is where the button is wired.</p>
+    <div class="row">
+      <button id="watch" class="primary">Start watching</button>
+      <label class="check muted"><input type="checkbox" id="grab">
+        exclusive - stop presses reaching Batocera</label>
+      <label class="check muted"><input type="checkbox" id="allDevices">
+        watch every input device</label>
+    </div>
+    <div id="inputStatus"></div>
+    <div id="inputLog"></div>
+  </div>
+
+  <div class="card" id="pins"><span class="muted">loading...</span></div>
+</main>
+<script src="/static/app.js"></script>
+</body>
+</html>
