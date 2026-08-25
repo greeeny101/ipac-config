@@ -104,35 +104,19 @@ function renderChanges(result, target) {
     : `<strong>${result.changes.length} byte(s) would change.</strong>`;
   banner(target, `${head}${notesHtml(result.notes)}<pre>${esc(rows)}</pre>`,
          result.written ? 'ok' : '');
-  if (result.warning) {
-    $(target).insertAdjacentHTML('afterbegin',
-      `<div class="banner warn">${esc(result.warning)}</div>`);
-  }
-  // Dinput takes a write and never commits it. Say so before the button is
-  // pressed, not after the next power cycle has thrown the work away.
-  if (result.flash_warning) {
-    $(target).insertAdjacentHTML('afterbegin',
-      `<div class="banner warn">${esc(result.flash_warning)}</div>`);
-  }
-  // The board picks its mode from what it is sent. Say which way it is
-  // expected to go, so "nothing happened" can be told apart from "it wrote
-  // fine and stayed in the mode it was already in".
-  if (result.mode_note) {
-    $(target).insertAdjacentHTML('afterbegin',
-      `<div class="banner">${esc(result.mode_note)}</div>`);
-  }
-  // Assigning gamepad actions to the six pins the mode hotkeys use leaves no
-  // way back except the power-up backdoor. Say it before the button, not
-  // after the panel has stopped responding to Start1+P1SW4.
-  if (result.hotkey_warning) {
-    $(target).insertAdjacentHTML('afterbegin',
-      `<div class="banner warn">${esc(result.hotkey_warning)}</div>`);
-  }
-  // Xinput has no config interface: this would be the last write we can make.
-  if (result.xinput_warning) {
-    $(target).insertAdjacentHTML('afterbegin',
-      `<div class="banner warn">${esc(result.xinput_warning)}</div>`);
-  }
+  renderChecks(result.checks, target);
+}
+
+// What the write would cost, said before the button rather than after the
+// panel has stopped responding. The server sends these already ordered -
+// loudest first - and the CLI prints the same list in the same order, so the
+// two cannot drift over which checks a write gets. See ipacconf/checks.py.
+function renderChecks(checks, target) {
+  if (!checks || !checks.length) return;
+  const html = checks.map(c =>
+    `<div class="banner${c.level === 'warning' ? ' warn' : ''}">${esc(c.text)}</div>`
+  ).join('');
+  $(target).insertAdjacentHTML('afterbegin', html);
 }
 
 async function loadDevice() {

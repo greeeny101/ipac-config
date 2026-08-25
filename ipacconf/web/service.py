@@ -15,17 +15,11 @@ from __future__ import annotations
 import os
 import sys
 
-from ..checks import (
-    _gamepad_warning,
-    hotkey_warning,
-    mode_switch_note,
-    xinput_warning,
-)
+from ..checks import collect, find
 from ..codec import as_write_command, decode_config, diff_config, encode_config
 from ..codes import CODE_GROUPS, _fmt_byte
 from ..device import open_board
 from ..errors import DeviceError, ProtocolError, ReadOnlyError
-from ..firmware import flash_write_blocked
 from ..inputs.devices import find_input_devices
 from ..inputs.monitor import _fake_device
 from ..library import (
@@ -212,6 +206,7 @@ class Service:
         return profile, str(payload.get("name") or "the imported file")
 
     def _write(self, board, current, updated, profile, payload) -> dict:
+        found = collect(updated, board.info, profile)
         result = {
             "changes": [
                 {
@@ -222,18 +217,12 @@ class Service:
                 }
                 for c in diff_config(current, updated)
             ],
-            "warning": _gamepad_warning(profile, board.info),
+            "checks": found,
             "written": False,
         }
-        blocked = flash_write_blocked(board.info)
-        if blocked:
-            result["flash_warning"] = blocked
-        result["mode_note"] = mode_switch_note(updated, board.info)
-        result["hotkey_warning"] = hotkey_warning(updated)
-        result["xinput_warning"] = xinput_warning(updated, board.info)
-
         if payload.get("dry_run") or not result["changes"]:
             return result
+        blocked = find(found, "flash")
         if blocked and not payload.get("force"):
             raise ProtocolError(blocked)
         result["backup"] = write_backup(

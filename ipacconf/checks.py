@@ -1,7 +1,9 @@
 """Safety checks run before a config is written.
 
 Each returns a message or None. They are shared by the CLI and the web UI, so
-they must stay free of printing and of HTTP.
+they must stay free of printing and of HTTP - `collect` is what both front
+ends call, and running them through one list is what stops the two drifting
+over which checks a write gets.
 """
 
 from __future__ import annotations
@@ -16,7 +18,11 @@ from .codes import (
     control_span,
     is_game_code,
 )
-from .firmware import firmware_note, firmware_supports_gamepad
+from .firmware import (
+    firmware_note,
+    firmware_supports_gamepad,
+    flash_write_blocked,
+)
 from .identity import MODE_KEYBOARD, VENDOR_XINPUT
 from .pins import PIN_ORDER, PIN_TABLE
 from .protocol import SHIFT_BIT, XINPUT_BIT
@@ -211,4 +217,52 @@ def _gamepad_warning(profile: dict, info: DeviceInfo):
             "         The bytes will be written, but the board cannot act on "
             "them until it is upgraded to 1.50+.\n" % (info.firmware, firmware_note(info.bcd & 0xFF))
         )
+    return None
+
+
+# Loudest first, and the same order in both front ends. The ladder is what a
+# careless write costs: an unreachable board, then a board reachable only
+# through the power-up backdoor, then a write that is silently thrown away,
+# then one that lands but cannot do anything, then two things merely worth
+# knowing.
+CHECKS = (
+    ("xinput", "warning"),       # Xinput has no config interface at all
+    ("hotkey", "warning"),       # the mode-switch combos stop working
+    ("flash", "warning"),        # Dinput takes the write and never commits it
+    ("gamepad", "warning"),      # firmware too old to act on gamepad codes
+    ("mode", "note"),            # which way the board is expected to switch
+    ("unconfirmed", "note"),     # codes inside a block we have not confirmed
+)
+
+
+def collect(updated: bytes, info, profile=None) -> list:
+    """Every check with something to say about this write, loudest first.
+
+    Returns [{"key", "level", "text"}]. `level` is "warning" for something
+    that could cost access to the board and "note" for something merely worth
+    knowing; `key` is how a caller picks one out again - see `find`.
+
+    `profile` is only needed for the gamepad check, which reads the requested
+    actions rather than the bytes; pass None where there is no profile.
+    """
+    text = {
+        "xinput": xinput_warning(updated, info),
+        "hotkey": hotkey_warning(updated),
+        "flash": flash_write_blocked(info),
+        "gamepad": _gamepad_warning(profile, info) if profile is not None else None,
+        "mode": mode_switch_note(updated, info),
+        "unconfirmed": unconfirmed_code_warning(updated),
+    }
+    return [
+        {"key": key, "level": level, "text": text[key]}
+        for key, level in CHECKS
+        if text[key]
+    ]
+
+
+def find(found: list, key: str):
+    """The text of one collected check, or None if it had nothing to say."""
+    for item in found:
+        if item["key"] == key:
+            return item["text"]
     return None

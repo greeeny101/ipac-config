@@ -8,13 +8,7 @@ import json
 import queue
 import sys
 
-from .checks import (
-    _gamepad_warning,
-    hotkey_warning,
-    mode_switch_note,
-    unconfirmed_code_warning,
-    xinput_warning,
-)
+from .checks import collect, find
 from .codec import (
     as_write_command,
     decode_config,
@@ -134,6 +128,15 @@ def cmd_dump(args) -> int:
     return 0
 
 
+def _print_checks(found, skip=()) -> None:
+    """Say what the checks found, loudest first. The web UI shows this list."""
+    for item in found:
+        if item["key"] in skip:
+            continue
+        prefix = "WARNING: " if item["level"] == "warning" else "note: "
+        print("%s%s\n" % (prefix, item["text"]), file=sys.stderr)
+
+
 def cmd_apply(args) -> int:
     profile = load_profile(args.profile)
     with open_board(args) as board:
@@ -141,25 +144,11 @@ def cmd_apply(args) -> int:
         updated = bytes(encode_config(profile, current, args.xinput))
         changes = diff_config(current, updated)
 
-        warning = _gamepad_warning(profile, board.info)
-        if warning:
-            print(warning, file=sys.stderr)
-
-        hotkeys = hotkey_warning(updated)
-        if hotkeys:
-            print("WARNING: %s\n" % hotkeys, file=sys.stderr)
-
-        xinput = xinput_warning(updated, board.info)
-        if xinput:
-            print("WARNING: %s\n" % xinput, file=sys.stderr)
-
-        unconfirmed = unconfirmed_code_warning(updated)
-        if unconfirmed:
-            print("note: %s\n" % unconfirmed, file=sys.stderr)
-
-        blocked = flash_write_blocked(board.info)
-        if blocked and args.dry_run:
-            print("WARNING: %s\n" % blocked, file=sys.stderr)
+        found = collect(updated, board.info, profile)
+        # A blocked write is raised as an error below rather than warned
+        # about - except on a dry run, where there is no write to block.
+        _print_checks(found, skip=() if args.dry_run else ("flash",))
+        blocked = find(found, "flash")
 
         if not changes:
             print("no change - the board already matches %s" % args.profile)
@@ -197,9 +186,6 @@ def cmd_apply(args) -> int:
             "wrote %d bytes in %d messages to %s"
             % (WRITE_SIZE, WRITE_SIZE // CHUNK, board.info.path)
         )
-        note = mode_switch_note(updated, board.info)
-        if note:
-            print("note: %s" % note, file=sys.stderr)
 
     return 0
 
@@ -212,18 +198,23 @@ def cmd_restore(args) -> int:
             print("note: %s" % note, file=sys.stderr)
         current = board.read_config()
         changes = diff_config(current, raw)
+
+        # The same checks the web UI runs on a restore. They used to be
+        # skipped here, so `restore` was the one route that could disarm the
+        # mode hotkeys without saying so.
+        found = collect(raw, board.info, profile)
+        _print_checks(found, skip=() if args.dry_run else ("flash",))
+        blocked = find(found, "flash")
+
         if not changes:
             print("no change - the board already matches %s" % args.backup)
             return 0
         print("restoring %d byte%s" % (len(changes), "" if len(changes) == 1 else "s"))
-        blocked = flash_write_blocked(board.info)
         if args.dry_run:
             for change in changes:
                 print("  [%3d] %-18s %s -> %s" % (
                     change["offset"], change["meaning"],
                     _fmt_byte(change["before"]), _fmt_byte(change["after"])))
-            if blocked:
-                print("\nWARNING: %s" % blocked, file=sys.stderr)
             print("\ndry run - nothing written")
             return 0
         if blocked and not args.force:
