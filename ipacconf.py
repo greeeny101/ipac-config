@@ -2489,7 +2489,6 @@ def cmd_dump(args) -> int:
     with open_board(args) as board:
         raw = board.read_config()
         info = board.info
-        info = board.info
     profile = decode_config(raw)
     # What a read returns depends on the mode the board is in, so a dump that
     # does not say which mode it came from cannot be trusted later. A
@@ -2533,6 +2532,22 @@ def cmd_apply(args) -> int:
         warning = _gamepad_warning(profile, board.info)
         if warning:
             print(warning, file=sys.stderr)
+
+        hotkeys = hotkey_warning(updated)
+        if hotkeys:
+            print("WARNING: %s\n" % hotkeys, file=sys.stderr)
+
+        xinput = xinput_warning(updated, board.info)
+        if xinput:
+            print("WARNING: %s\n" % xinput, file=sys.stderr)
+
+        unconfirmed = unconfirmed_code_warning(updated)
+        if unconfirmed:
+            print("note: %s\n" % unconfirmed, file=sys.stderr)
+
+        blocked = flash_write_blocked(board.info)
+        if blocked and args.dry_run:
+            print("WARNING: %s\n" % blocked, file=sys.stderr)
 
         if not changes:
             print("no change - the board already matches %s" % args.profile)
@@ -3054,6 +3069,29 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--dry-run", action="store_true", help="show the diff, write nothing")
     p.add_argument("--no-backup", action="store_true")
     p.add_argument("--backup-dir")
+    p.add_argument(
+        "--force",
+        action="store_true",
+        help="write even in a mode where the board will not commit to flash",
+    )
+    xinput = p.add_mutually_exclusive_group()
+    xinput.add_argument(
+        "--xinput", "--reconfigure",
+        dest="xinput",
+        action="store_true",
+        default=None,
+        help="mark the config as an Xinput one (config bit 1), so the board "
+             "comes up as an Xbox 360 pad. This is the bit WinIPAC's File -> "
+             "Force Board Reconfiguration sets. NOTE Xinput has no config "
+             "interface, so this tool cannot reach the board afterwards",
+    )
+    xinput.add_argument(
+        "--no-xinput",
+        dest="xinput",
+        action="store_false",
+        help="clear the Xinput bit, so the board's gamepad mode is Dinput. "
+             "Without either flag the board keeps whatever it had",
+    )
     p.set_defaults(func=cmd_apply)
 
     p = sub.add_parser("restore", help="write a dump back byte for byte", parents=[common])
@@ -3061,6 +3099,29 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--dry-run", action="store_true")
     p.add_argument("--no-backup", action="store_true")
     p.add_argument("--backup-dir")
+    p.add_argument(
+        "--force",
+        action="store_true",
+        help="write even in a mode where the board will not commit to flash",
+    )
+    xinput = p.add_mutually_exclusive_group()
+    xinput.add_argument(
+        "--xinput", "--reconfigure",
+        dest="xinput",
+        action="store_true",
+        default=None,
+        help="mark the config as an Xinput one (config bit 1), so the board "
+             "comes up as an Xbox 360 pad. This is the bit WinIPAC's File -> "
+             "Force Board Reconfiguration sets. NOTE Xinput has no config "
+             "interface, so this tool cannot reach the board afterwards",
+    )
+    xinput.add_argument(
+        "--no-xinput",
+        dest="xinput",
+        action="store_false",
+        help="clear the Xinput bit, so the board's gamepad mode is Dinput. "
+             "Without either flag the board keeps whatever it had",
+    )
     p.set_defaults(func=cmd_restore)
 
     p = sub.add_parser("saved", help="list saved configs and presets", parents=[common])
@@ -3486,6 +3547,12 @@ def _make_handler(args):
                 updated = bytes(encode_config(
                     profile, current, payload.get("xinput")))
                 result = self._changes_result(board, current, updated, profile)
+                blocked = flash_write_blocked(board.info)
+                if blocked:
+                    result["flash_warning"] = blocked
+                result["mode_note"] = mode_switch_note(updated, board.info)
+                result["hotkey_warning"] = hotkey_warning(updated)
+                result["xinput_warning"] = xinput_warning(updated, board.info)
                 if not dry_run and result["changes"]:
                     if blocked and not payload.get("force"):
                         raise ProtocolError(blocked)
@@ -3534,6 +3601,12 @@ def _make_handler(args):
                 result = self._changes_result(board, current, updated, profile)
                 result["source"] = origin
                 result["notes"] = import_notes(profile, board.info)
+                blocked = flash_write_blocked(board.info)
+                if blocked:
+                    result["flash_warning"] = blocked
+                result["mode_note"] = mode_switch_note(updated, board.info)
+                result["hotkey_warning"] = hotkey_warning(updated)
+                result["xinput_warning"] = xinput_warning(updated, board.info)
                 if not dry_run and result["changes"]:
                     if blocked and not payload.get("force"):
                         raise ProtocolError(blocked)
@@ -3846,6 +3919,31 @@ function renderChanges(result, target) {
   if (result.warning) {
     $(target).insertAdjacentHTML('afterbegin',
       `<div class="banner warn">${esc(result.warning)}</div>`);
+  }
+  // Dinput takes a write and never commits it. Say so before the button is
+  // pressed, not after the next power cycle has thrown the work away.
+  if (result.flash_warning) {
+    $(target).insertAdjacentHTML('afterbegin',
+      `<div class="banner warn">${esc(result.flash_warning)}</div>`);
+  }
+  // The board picks its mode from what it is sent. Say which way it is
+  // expected to go, so "nothing happened" can be told apart from "it wrote
+  // fine and stayed in the mode it was already in".
+  if (result.mode_note) {
+    $(target).insertAdjacentHTML('afterbegin',
+      `<div class="banner">${esc(result.mode_note)}</div>`);
+  }
+  // Assigning gamepad actions to the six pins the mode hotkeys use leaves no
+  // way back except the power-up backdoor. Say it before the button, not
+  // after the panel has stopped responding to Start1+P1SW4.
+  if (result.hotkey_warning) {
+    $(target).insertAdjacentHTML('afterbegin',
+      `<div class="banner warn">${esc(result.hotkey_warning)}</div>`);
+  }
+  // Xinput has no config interface: this would be the last write we can make.
+  if (result.xinput_warning) {
+    $(target).insertAdjacentHTML('afterbegin',
+      `<div class="banner warn">${esc(result.xinput_warning)}</div>`);
   }
 }
 
