@@ -40,6 +40,10 @@ firmware_*.zip
 *.swp
 *~
 
+# Claude Code's project settings. The permission allowlist accumulates absolute
+# paths from whichever machine approved them, so this stays local.
+.claude/
+
 # Anything that wanders in from a shell session
 *.pem
 id_rsa*
